@@ -1,0 +1,391 @@
+/*
+ * Custom surfaces only. Mantine owns buttons, inputs, selects, segmented
+ * controls, tabs, modals, menus, tooltips, notifications and their theming.
+ * What remains here styles the bespoke devtools surfaces that aren't Mantine
+ * components: the app shell grid, sessions sidebar, virtualized network list,
+ * waterfall, request-detail key/value + WebSocket frames, and the status bar.
+ */
+* {
+  box-sizing: border-box;
+}
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+:root[data-theme='dark'] {
+  --bg: #15171c;
+  --bg-panel: #1b1e24;
+  --bg-elev: #20242b;
+  --bg-pre: #0e1014;
+  --border: #2c313a;
+  --border-soft: #23272f;
+  --text: #e8eaed;
+  --text-dim: #9aa0aa;
+  --text-mute: #646b76;
+  --accent: #3b82f6;
+  --row-hover: #232830;
+  --row-selected: #1e3a5f;
+  --row-selected-bar: #3b82f6;
+  --good: #34d399;
+  --bad: #f87171;
+}
+:root[data-theme='light'] {
+  --bg: #f4f5f7;
+  --bg-panel: #ffffff;
+  --bg-elev: #fbfbfd;
+  --bg-pre: #f3f4f6;
+  --border: #e0e3e8;
+  --border-soft: #eceef1;
+  --text: #1a1d23;
+  --text-dim: #5a616b;
+  --text-mute: #9aa0aa;
+  --accent: #2563eb;
+  --row-hover: #f1f4f8;
+  --row-selected: #dbeafe;
+  --row-selected-bar: #2563eb;
+  --good: #059669;
+  --bad: #dc2626;
+}
+
+body {
+  font-size: 13px;
+  overflow: hidden;
+}
+
+.app {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  height: 100vh;
+}
+
+/* Toolbar is a Mantine <Group>; we only add the panel chrome around it. */
+.toolbar {
+  padding: 9px 12px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+}
+
+/* ───────────── Main layout ───────────── */
+.main {
+  display: grid;
+  grid-template-columns: 250px minmax(0, 1fr) 470px;
+  min-height: 0;
+}
+
+.sidebar {
+  background: var(--bg-panel);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.sidebar-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.sidebar-head h3 {
+  margin: 0;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-dim);
+}
+.sidebar .session-list {
+  flex: 1;
+  overflow: auto;
+  padding: 6px;
+}
+.sidebar-empty {
+  padding: 16px 8px;
+  text-align: center;
+}
+.sidebar .session {
+  padding: 9px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: 7px;
+  margin-bottom: 3px;
+  border: 1px solid transparent;
+}
+.sidebar .session:hover {
+  background: var(--row-hover);
+}
+.sidebar .session.active {
+  background: var(--row-selected);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.sidebar .session .session-name {
+  font-weight: 550;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sidebar .session .session-rename {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  color: var(--text);
+  border-radius: 5px;
+  padding: 3px 6px;
+  font-size: 12px;
+  font-family: inherit;
+}
+.sidebar .session .session-rename:focus {
+  outline: none;
+}
+.sidebar .session .meta {
+  color: var(--text-mute);
+}
+.sidebar .actions {
+  padding: 9px 12px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.list-pane {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+}
+.list-header {
+  display: grid;
+  grid-template-columns: 96px 64px 56px 1fr 76px 86px;
+  background: var(--bg-panel);
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-bottom: 1px solid var(--border);
+}
+.list-header > div {
+  padding: 7px 8px;
+  border-right: 1px solid var(--border-soft);
+}
+.list-body {
+  flex: 1;
+  overflow: auto;
+}
+.list-row {
+  display: grid;
+  grid-template-columns: 96px 64px 56px 1fr 76px 86px;
+  font-size: 12px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border-soft);
+  align-items: center;
+}
+.list-row > div {
+  padding: 5px 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.list-row:hover {
+  background: var(--row-hover);
+}
+.list-row.selected {
+  background: var(--row-selected);
+  box-shadow: inset 3px 0 0 var(--row-selected-bar);
+}
+.list-row.failed > .status-cell {
+  color: var(--bad);
+}
+
+.type-pill {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  background: var(--bg-elev);
+  color: var(--text-dim);
+}
+.type-Fetch {
+  background: rgba(29, 78, 216, 0.22);
+  color: #93c5fd;
+}
+.type-XHR {
+  background: rgba(109, 40, 217, 0.24);
+  color: #c4b5fd;
+}
+.type-WebSocket {
+  background: rgba(5, 150, 105, 0.22);
+  color: #6ee7b7;
+}
+.type-Document {
+  background: rgba(217, 119, 6, 0.22);
+  color: #fcd34d;
+}
+.type-Script {
+  background: rgba(244, 63, 94, 0.18);
+  color: #fda4af;
+}
+
+.status-2xx {
+  color: var(--good);
+}
+.status-3xx {
+  color: #fbbf24;
+}
+.status-4xx {
+  color: #fb923c;
+}
+.status-5xx {
+  color: #ef4444;
+}
+.status-failed {
+  color: var(--bad);
+}
+
+.waterfall-bar {
+  position: relative;
+  height: 12px;
+  background: var(--border-soft);
+  border-radius: 3px;
+}
+.waterfall-bar > .fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: var(--accent);
+  border-radius: 3px;
+}
+
+.detail-pane {
+  overflow: auto;
+  padding: 14px 16px;
+  background: var(--bg-elev);
+}
+
+.kv {
+  display: grid;
+  grid-template-columns: 150px 1fr;
+  gap: 5px 12px;
+  font-size: 12px;
+  margin-bottom: 12px;
+}
+.kv .k {
+  color: var(--text-mute);
+}
+.kv .v {
+  color: var(--text);
+  word-break: break-all;
+}
+
+pre {
+  background: var(--bg-pre);
+  border: 1px solid var(--border-soft);
+  border-radius: 7px;
+  padding: 11px;
+  overflow: auto;
+  font-size: 11.5px;
+  max-height: 380px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--text);
+}
+
+mark.hl {
+  background: rgba(250, 204, 21, 0.4);
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+.ws-frame {
+  border-left: 3px solid var(--border);
+  padding: 5px 9px;
+  margin-bottom: 5px;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 11px;
+  background: var(--bg-pre);
+  border-radius: 0 6px 6px 0;
+}
+.ws-frame.sent {
+  border-left-color: var(--accent);
+}
+.ws-frame.received {
+  border-left-color: var(--good);
+}
+.ws-frame .meta {
+  color: var(--text-mute);
+  font-size: 10px;
+  margin-bottom: 2px;
+}
+
+/* ───────────── Command output (CLI capture) ───────────── */
+.cmd-output {
+  background: var(--bg-pre);
+  border: 1px solid var(--border-soft);
+  border-radius: 7px;
+}
+.cmd-pre {
+  margin: 0;
+  padding: 9px 11px;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 11.5px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: none;
+}
+.cmd-pre .cmd-stdout {
+  color: var(--text);
+}
+.cmd-pre .cmd-stderr {
+  color: var(--bad);
+}
+.cmd-pre .cmd-meta {
+  color: var(--text-mute);
+  font-style: italic;
+}
+
+/* ───────────── Status bar ───────────── */
+.statusbar {
+  padding: 7px 14px;
+  background: var(--bg-panel);
+  color: var(--text-dim);
+  font-size: 11px;
+  border-top: 1px solid var(--border);
+}
+.token-pill {
+  font-family: ui-monospace, Menlo, monospace;
+  background: var(--bg);
+  border: 1px solid var(--border-soft);
+  padding: 1px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  user-select: all;
+}
+
+.empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-mute);
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.dot.on {
+  background: var(--good);
+}
+.dot.off {
+  background: var(--bad);
+}

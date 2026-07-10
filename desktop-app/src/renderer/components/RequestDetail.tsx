@@ -1,0 +1,189 @@
+import { Fragment, useState, type ReactNode } from 'react';
+import { Tabs, TextInput, Text } from '@mantine/core';
+import type { CapturedRequest, CapturedHeader } from '@har-suite/shared';
+
+type Tab = 'headers' | 'payload' | 'response' | 'ws' | 'script';
+
+function HeaderTable({ headers, highlight }: { headers: CapturedHeader[]; highlight?: string }) {
+  if (!headers.length) return <Text c="dimmed">(no headers)</Text>;
+  return (
+    <div className="kv">
+      {headers.map((h, i) => (
+        <Fragment key={i}>
+          <div className="k">{h.name}</div>
+          <div className="v">{highlightText(h.value, highlight)}</div>
+        </Fragment>
+      ))}
+    </div>
+  );
+}
+
+function highlightText(text: string, query: string | undefined): ReactNode {
+  const q = (query ?? '').trim();
+  if (!q) return text;
+  const lower = text.toLowerCase();
+  const ql = q.toLowerCase();
+  const out: ReactNode[] = [];
+  let i = 0;
+  let idx = lower.indexOf(ql);
+  while (idx !== -1) {
+    if (idx > i) out.push(text.slice(i, idx));
+    out.push(
+      <mark key={`m-${idx}`} className="hl">
+        {text.slice(idx, idx + ql.length)}
+      </mark>,
+    );
+    i = idx + ql.length;
+    idx = lower.indexOf(ql, i);
+  }
+  if (i < text.length) out.push(text.slice(i));
+  return out;
+}
+
+function tryPretty(text: string, mime: string | undefined): string {
+  const m = (mime ?? '').toLowerCase();
+  if (m.includes('json') || text.trim().startsWith('{') || text.trim().startsWith('[')) {
+    try {
+      return JSON.stringify(JSON.parse(text), null, 2);
+    } catch {}
+  }
+  return text;
+}
+
+export default function RequestDetail({
+  request,
+  highlight,
+}: {
+  request: CapturedRequest;
+  highlight?: string;
+}) {
+  const [tab, setTab] = useState<Tab>('headers');
+  const [wsFilter, setWsFilter] = useState('');
+  const isWs = request.type === 'WebSocket';
+
+  const filteredWs = (request.wsMessages ?? []).filter(
+    (m) => !wsFilter || m.payload.toLowerCase().includes(wsFilter.toLowerCase()),
+  );
+
+  const contentType = request.requestHeaders.find(
+    (h) => h.name.toLowerCase() === 'content-type',
+  )?.value;
+
+  return (
+    <div>
+      <div className="kv" style={{ marginBottom: 8 }}>
+        <div className="k">URL</div>
+        <div className="v">{request.url}</div>
+        <div className="k">Method</div>
+        <div className="v">{request.method}</div>
+        <div className="k">Status</div>
+        <div className="v">
+          {request.failed
+            ? `Failed: ${request.errorText}`
+            : `${request.status ?? '...'} ${request.statusText ?? ''}`}
+        </div>
+        <div className="k">Type</div>
+        <div className="v">{request.type}</div>
+        <div className="k">Duration</div>
+        <div className="v">
+          {request.durationMs != null ? `${request.durationMs.toFixed(0)} ms` : '-'}
+        </div>
+        <div className="k">Initiator</div>
+        <div className="v">{request.initiator ?? '-'}</div>
+      </div>
+
+      <Tabs value={tab} onChange={(v) => setTab((v as Tab) ?? 'headers')} mb="sm">
+        <Tabs.List>
+          <Tabs.Tab value="headers">Headers</Tabs.Tab>
+          {!isWs && <Tabs.Tab value="payload">Payload</Tabs.Tab>}
+          {!isWs && <Tabs.Tab value="response">Response</Tabs.Tab>}
+          {request.type === 'Script' && <Tabs.Tab value="script">Script</Tabs.Tab>}
+          {isWs && <Tabs.Tab value="ws">Messages ({request.wsMessages?.length ?? 0})</Tabs.Tab>}
+        </Tabs.List>
+
+        <Tabs.Panel value="headers" pt="sm">
+          <Text size="sm" fw={600} c="dimmed" mb={4}>
+            Request Headers
+          </Text>
+          <HeaderTable headers={request.requestHeaders} highlight={highlight} />
+          <Text size="sm" fw={600} c="dimmed" mt="md" mb={4}>
+            Response Headers
+          </Text>
+          <HeaderTable headers={request.responseHeaders} highlight={highlight} />
+        </Tabs.Panel>
+
+        {!isWs && (
+          <Tabs.Panel value="payload" pt="sm">
+            {request.requestBody ? (
+              <pre>{highlightText(tryPretty(request.requestBody, contentType), highlight)}</pre>
+            ) : (
+              <Text c="dimmed">(no request body)</Text>
+            )}
+          </Tabs.Panel>
+        )}
+
+        {!isWs && (
+          <Tabs.Panel value="response" pt="sm">
+            {request.responseBody ? (
+              <pre>
+                {highlightText(
+                  tryPretty(request.responseBody, request.responseMimeType),
+                  highlight,
+                )}
+              </pre>
+            ) : (
+              <Text c="dimmed">(no response body — may not have finished, or body was binary)</Text>
+            )}
+          </Tabs.Panel>
+        )}
+
+        {request.type === 'Script' && (
+          <Tabs.Panel value="script" pt="sm">
+            {request.responseBody ? (
+              <div style={{ position: 'relative' }}>
+                <pre style={{ maxHeight: '600px', overflow: 'auto', fontSize: '12px', lineHeight: '1.5' }}>
+                  {highlightText(request.responseBody, highlight)}
+                </pre>
+              </div>
+            ) : (
+              <Text c="dimmed">(no script content — body may not be available)</Text>
+            )}
+          </Tabs.Panel>
+        )}
+
+        {isWs && (
+          <Tabs.Panel value="ws" pt="sm">
+            <TextInput
+              placeholder="Filter messages…"
+              value={wsFilter}
+              onChange={(e) => setWsFilter(e.currentTarget.value)}
+              mb="sm"
+            />
+            {filteredWs.length === 0 ? (
+              <Text c="dimmed">
+                {(request.wsMessages ?? []).length === 0
+                  ? '(no messages yet)'
+                  : '(no messages match filter)'}
+              </Text>
+            ) : (
+              filteredWs.map((m, i) => (
+                <div key={i} className={`ws-frame ${m.direction}`}>
+                  <div className="meta">
+                    {m.direction.toUpperCase()} · opcode {m.opcode} · {m.payloadLength} bytes ·{' '}
+                    {new Date(m.timestamp).toISOString()}
+                  </div>
+                  <div>
+                    {highlightText(
+                      m.payload.slice(0, 4000) + (m.payload.length > 4000 ? '...' : ''),
+                      wsFilter || highlight,
+                    )}
+                  </div>
+                </div>
+              ))
+            )}
+          </Tabs.Panel>
+        )}
+      </Tabs>
+    </div>
+  );
+}

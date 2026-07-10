@@ -1,0 +1,39 @@
+{
+  "name": "har-capture-suite",
+  "version": "0.1.1",
+  "private": true,
+  "description": "Auto-capture FETCH/XHR/WebSocket requests from Chrome and export as HAR/ZIP",
+  "workspaces": [
+    "desktop-app",
+    "extension",
+    "shared"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=desktop-app",
+    "dev:extension": "npm run watch --workspace=extension",
+    "build:desktop": "npm run build --workspace=desktop-app",
+    "build:extension": "npm run build --workspace=extension",
+    "build": "npm run build:extension && npm run build:desktop",
+    "start": "npm run start --workspace=desktop-app",
+    "pack": "npm run pack --workspace=desktop-app",
+    "dist": "npm run dist --workspace=desktop-app",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write \"**/*.{ts,tsx,js,mjs,json,css,html,md}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,mjs,json,css,html,md}\"",
+    "typecheck": "npm run typecheck --workspace=extension && tsc -p desktop-app --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.5.0",
+    "@typescript-eslint/eslint-plugin": "^8.0.0",
+    "@typescript-eslint/parser": "^8.0.0",
+    "eslint": "^9.5.0",
+    "eslint-plugin-react": "^7.34.3",
+    "eslint-plugin-react-hooks": "^5.1.0",
+    "globals": "^15.6.0",
+    "prettier": "^3.3.2",
+    "vitest": "^2.0.0"
+  }
+}

@@ -1,0 +1,46 @@
+appId: com.harsuite.app
+productName: HAR Capture Suite
+copyright: HAR Capture Suite
+electronVersion: 31.7.7
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - out/**
+  - package.json
+  - '!**/.vscode/*'
+  - '!**/*.{md,iml}'
+  - '!**/.{eslintrc.cjs,prettierrc.json,prettierignore}'
+
+asar: true
+
+extraMetadata:
+  main: out/main/index.js
+
+win:
+  target:
+    - nsis
+    - zip
+  artifactName: '${productName}-${version}-${arch}.${ext}'
+
+mac:
+  target:
+    - dmg
+    - zip
+  category: public.app-category.developer-tools
+  artifactName: '${productName}-${version}-${arch}.${ext}'
+
+linux:
+  target:
+    - AppImage
+    - deb
+  category: Development
+  artifactName: '${productName}-${version}-${arch}.${ext}'
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  deleteAppDataOnUninstall: false
