@@ -1,5 +1,7 @@
 import {
+  cdpDuration,
   mapResourceTypeFull,
+  pickEvictionKey,
   shouldCapture,
   type CaptureScope,
   type CapturedHeader,
@@ -63,6 +65,8 @@ interface InFlight {
   url: string;
   host: string;
   startedAt: number;
+  /** CDP MonotonicTime (seconds) captured at request start; undefined until known (e.g. WS pre-handshake). */
+  startMonotonicSec?: number;
   requestHeaders: CapturedHeader[];
   requestBody?: string;
   initiator?: string;
@@ -83,6 +87,11 @@ function parseHost(url: string): string {
 
 export class DebuggerCapture {
   private attachedTabs = new Set<number>();
+  // Synchronous reservation set (Bug 2). A tab is added here BEFORE the
+  // `await chrome.debugger.attach` so a concurrent redundant attach() on the same
+  // navigation hits the guard and returns without touching live state. Released in
+  // the owning attempt's `finally`. Mirrors the pure AttachRegistry `attaching` set.
+  private attaching = new Set<number>();
   // sessionId -> child session info. Root sessions have no sessionId and are
   // represented by tabId only (not stored here).
   private sessions = new Map<string, SessionInfo>();
@@ -100,7 +109,13 @@ export class DebuggerCapture {
   }
 
   async attach(tabId: number): Promise<void> {
-    if (this.attachedTabs.has(tabId)) return;
+    // Synchronous guard: already attached OR a reservation is in flight → no-op.
+    // A redundant concurrent attach (e.g. webNavigation.onCommitted frameId 0 AND
+    // tabs.onUpdated 'loading' on one navigation) returns here without touching
+    // live state, so its would-be catch can never delete the winner's bookkeeping.
+    if (this.attachedTabs.has(tabId) || this.attaching.has(tabId)) return;
+    // Reserve BEFORE the await — this closes the race window.
+    this.attaching.add(tabId);
     try {
       await chrome.debugger.attach({ tabId }, DEBUGGER_PROTOCOL);
       // Mark attached before awaiting enable so a racing detach can find it.
@@ -120,9 +135,13 @@ export class DebuggerCapture {
       });
       console.log('[debugger] attached', tabId);
     } catch (e) {
+      // Only the owning attempt reaches here (a genuine failure) — clean up its own state.
       console.warn('[debugger] attach failed', tabId, e);
       this.attachedTabs.delete(tabId);
       this.tabSessions.delete(tabId);
+    } finally {
+      // Release this attempt's reservation (success or failure) so the tab can re-attach later.
+      this.attaching.delete(tabId);
     }
   }
 
@@ -291,6 +310,9 @@ export class DebuggerCapture {
       case 'Network.webSocketCreated':
         this.onWebSocketCreated(tabId, sessionId, sessionTarget, params);
         break;
+      case 'Network.webSocketWillSendHandshakeRequest':
+        this.onWebSocketWillSendHandshakeRequest(sessionId, params);
+        break;
       case 'Network.webSocketFrameSent':
         this.onWebSocketFrame(sessionId, params, 'sent');
         break;
@@ -310,8 +332,12 @@ export class DebuggerCapture {
   private trackInFlight(f: InFlight): void {
     this.inFlight.set(f.key, f);
     if (this.inFlight.size > INFLIGHT_LIMIT) {
-      const oldest = this.inFlight.keys().next().value;
-      if (oldest) this.inFlight.delete(oldest);
+      const victim = pickEvictionKey(this.inFlight.values());
+      if (victim !== undefined) this.inFlight.delete(victim);
+      // Documented all-WS fallback: when every in-flight entry is an open WebSocket
+      // (victim === undefined), do NOT evict — let the map briefly exceed the soft cap
+      // so a live socket isn't dropped. Concurrent WS count is small in practice and
+      // per-WS frames are bounded by MAX_WS_MESSAGES.
     }
   }
 
@@ -351,6 +377,7 @@ export class DebuggerCapture {
     }
 
     const startedAt = (p.wallTime ?? Date.now() / 1000) * 1000;
+    const startMonotonicSec = typeof p.timestamp === 'number' ? p.timestamp : undefined;
     const id = key;
     const inflight: InFlight = {
       id,
@@ -362,6 +389,7 @@ export class DebuggerCapture {
       url: p.request.url,
       host: parseHost(p.request.url),
       startedAt,
+      startMonotonicSec,
       requestHeaders: headersToList(p.request.headers),
       requestBody: typeof p.request.postData === 'string' ? p.request.postData : undefined,
       initiator: p.initiator?.type,
@@ -399,7 +427,20 @@ export class DebuggerCapture {
     const key = this.keyFor(sessionId, p.requestId);
     const f = this.inFlight.get(key);
     if (!f) return;
-    const endedAt = (p.timestamp ?? Date.now() / 1000) * 1000;
+    // Compute duration/endedAt from ONE monotonic base via cdpDuration (Bug 1). Fall back
+    // to a pure-epoch span when the monotonic base is unknown; Date.now() is read ONCE so
+    // endedAt and durationMs stay consistent, and the clamp (>= 0) is preserved either way.
+    const timing =
+      f.startMonotonicSec != null && typeof p.timestamp === 'number'
+        ? cdpDuration({
+            startedAtEpochMs: f.startedAt,
+            startMonotonicSec: f.startMonotonicSec,
+            endMonotonicSec: p.timestamp,
+          })
+        : (() => {
+            const now = Date.now();
+            return { endedAt: now, durationMs: Math.max(0, now - f.startedAt) };
+          })();
     let body: string | undefined;
     let isBase64 = false;
     try {
@@ -416,11 +457,14 @@ export class DebuggerCapture {
       // Body unavailable (navigation after commit, streamed/worker response, evicted buffer).
     }
     this.listener.onUpdate(f.id, {
-      endedAt,
-      durationMs: Math.max(0, endedAt - f.startedAt),
+      endedAt: timing.endedAt,
+      durationMs: timing.durationMs,
       responseBody: body,
       responseSize: typeof p.encodedDataLength === 'number' ? p.encodedDataLength : undefined,
-      ...(isBase64 ? { responseMimeType: 'application/octet-stream;base64' } : {}),
+      // Bug 4: flag base64 separately instead of overwriting responseMimeType. The real
+      // content-type set by onResponseReceived (from r.mimeType) is preserved; har.ts reads
+      // responseBodyBase64 to set content.encoding while keeping the true mimeType.
+      ...(isBase64 ? { responseBodyBase64: true } : {}),
     });
     this.inFlight.delete(key);
   }
@@ -429,12 +473,22 @@ export class DebuggerCapture {
     const key = this.keyFor(sessionId, p.requestId);
     const f = this.inFlight.get(key);
     if (!f) return;
-    const endedAt = (p.timestamp ?? Date.now() / 1000) * 1000;
+    const timing =
+      f.startMonotonicSec != null && typeof p.timestamp === 'number'
+        ? cdpDuration({
+            startedAtEpochMs: f.startedAt,
+            startMonotonicSec: f.startMonotonicSec,
+            endMonotonicSec: p.timestamp,
+          })
+        : (() => {
+            const now = Date.now();
+            return { endedAt: now, durationMs: Math.max(0, now - f.startedAt) };
+          })();
     this.listener.onUpdate(f.id, {
       failed: true,
       errorText: p.errorText,
-      endedAt,
-      durationMs: Math.max(0, endedAt - f.startedAt),
+      endedAt: timing.endedAt,
+      durationMs: timing.durationMs,
     });
     this.inFlight.delete(key);
   }
@@ -479,6 +533,16 @@ export class DebuggerCapture {
     });
   }
 
+  private onWebSocketWillSendHandshakeRequest(sessionId: string | undefined, p: any): void {
+    const f = this.inFlight.get(this.keyFor(sessionId, p.requestId));
+    if (!f) return;
+    // This event carries BOTH timestamp (monotonic) and wallTime (epoch), so it
+    // establishes the WS time base. It fires after webSocketCreated created the
+    // inFlight entry, so f will exist.
+    if (typeof p.timestamp === 'number') f.startMonotonicSec = p.timestamp; // monotonic base
+    if (typeof p.wallTime === 'number') f.startedAt = p.wallTime * 1000; // refine epoch base
+  }
+
   private onWebSocketFrame(
     sessionId: string | undefined,
     p: any,
@@ -488,12 +552,29 @@ export class DebuggerCapture {
     if (!f) return;
     const r = p.response ?? {};
     const payload = typeof r.payloadData === 'string' ? r.payloadData : '';
+    // Convert the frame's CDP MonotonicTime to epoch ms via cdpDuration (Bug 1) so the
+    // stored timestamp shares the SAME base as startedDateTime; har.ts then emits
+    // _webSocketMessages.time = timestamp/1000 as epoch seconds aligned with the entry
+    // (Requirement 1.7). Fall back to Date.now() when the monotonic base is unknown
+    // (WS pre-handshake) to stay consistent with the epoch base.
+    const frameEpochMs =
+      f.startMonotonicSec != null && typeof p.timestamp === 'number'
+        ? cdpDuration({
+            startedAtEpochMs: f.startedAt,
+            startMonotonicSec: f.startMonotonicSec,
+            endMonotonicSec: p.timestamp,
+          }).endedAt
+        : Date.now();
+    const opcode = typeof r.opcode === 'number' ? r.opcode : 0;
     const msg: WebSocketMessage = {
       direction,
-      timestamp: (p.timestamp ?? Date.now() / 1000) * 1000,
-      opcode: typeof r.opcode === 'number' ? r.opcode : 0,
+      timestamp: frameEpochMs,
+      opcode,
       payload,
       payloadLength: payload.length,
+      // Bug 4: mark binary frames (opcode 2) explicitly so har.ts can flag encoding='base64'
+      // downstream rather than inferring it solely from the opcode.
+      ...(opcode === 2 ? { isBinary: true } : {}),
     };
     this.listener.onWsMessage(f.id, msg);
   }
@@ -502,10 +583,20 @@ export class DebuggerCapture {
     const key = this.keyFor(sessionId, p.requestId);
     const f = this.inFlight.get(key);
     if (!f) return;
-    const endedAt = (p.timestamp ?? Date.now() / 1000) * 1000;
+    const timing =
+      f.startMonotonicSec != null && typeof p.timestamp === 'number'
+        ? cdpDuration({
+            startedAtEpochMs: f.startedAt,
+            startMonotonicSec: f.startMonotonicSec,
+            endMonotonicSec: p.timestamp,
+          })
+        : (() => {
+            const now = Date.now();
+            return { endedAt: now, durationMs: Math.max(0, now - f.startedAt) };
+          })();
     this.listener.onUpdate(f.id, {
-      endedAt,
-      durationMs: Math.max(0, endedAt - f.startedAt),
+      endedAt: timing.endedAt,
+      durationMs: timing.durationMs,
     });
     this.inFlight.delete(key);
   }

@@ -273,6 +273,8 @@ export interface WebSocketMessage {
   opcode: number;
   payload: string;
   payloadLength: number;
+  /** true for binary frames (opcode 2); payload is base64. */
+  isBinary?: boolean;
 }
 
 export interface CapturedRequest {
@@ -300,6 +302,8 @@ export interface CapturedRequest {
   responseHeaders: CapturedHeader[];
   responseBody?: string;
   responseMimeType?: string;
+  /** true when responseBody is base64-encoded (binary body); responseMimeType keeps the real content-type. */
+  responseBodyBase64?: boolean;
   responseSize?: number;
   fromCache?: boolean;
   initiator?: string;
@@ -519,6 +523,159 @@ export function wsCloseTiming(t: WsTimingEvents): { endedAt: number; durationMs?
       ? Math.max(0, t.wsClosedTimestamp - t.startTimestamp)
       : undefined;
   return { endedAt, durationMs };
+}
+
+/**
+ * Bug 1 (extension-capture-bugfixes §4 Bug 1) — the single source of CDP-path
+ * duration arithmetic. Extension/CDP rows mixed two time bases: `startedAt` is
+ * epoch ms (from `wallTime`) while the completion/frame `timestamp` is CDP
+ * MonotonicTime, so `endedAt - startedAt` was hugely negative and clamped to 0.
+ * Computing the elapsed span from ONE monotonic base
+ * (`endMonotonicSec - startMonotonicSec`) and anchoring it to the epoch
+ * `startedAtEpochMs` yields a real `durationMs` and an epoch-consistent `endedAt`.
+ *
+ * Reused for WS frame timestamps: `endedAt` is the frame's epoch ms, because the
+ * `Math.max(0, …)` clamp is a no-op once a frame arrives after the handshake, so
+ * `endedAt = startedAtEpochMs + (frameMono - startMono)·1000`. Pure/chrome-free
+ * so the timing logic is unit-testable without CDP. Additive only.
+ */
+export function cdpDuration(input: {
+  startedAtEpochMs: number;
+  startMonotonicSec: number;
+  endMonotonicSec: number;
+}): { durationMs: number; endedAt: number } {
+  const durationMs = Math.max(0, input.endMonotonicSec - input.startMonotonicSec) * 1000;
+  const endedAt = input.startedAtEpochMs + durationMs;
+  return { durationMs, endedAt };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Bug 2 (extension-capture-bugfixes §4 Bug 2) — pure, chrome-free attach state
+// machine. On one navigation, background.ts fires two attach paths for the same
+// tab; both cleared the has()-guard before either add()ed, so Chrome rejected
+// the second and ITS catch deleted the winner's live bookkeeping. AttachRegistry
+// reserves SYNCHRONOUSLY (before the await) over separate attached+attaching
+// sets, and runAttach mirrors the exact reserve → attachFn → commit/fail →
+// release order of the real attach(). Both are unit-testable with a fake attach
+// fn without chrome.*. Additive only: DebuggerCapture adopts the same ordering
+// in Task 3.2 without changing its API.
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * Pure attach-transition unit mirroring `DebuggerCapture.attach()` over two
+ * sets: `attached` (live attachments) and `attaching` (in-flight reservations).
+ * The synchronous `reserve` closes the race window — a concurrent redundant
+ * attempt sees the reservation and becomes a no-op instead of taking the real
+ * attach path whose catch could delete the winner's live state.
+ */
+export class AttachRegistry {
+  private readonly attached = new Set<number>();
+  private readonly attaching = new Set<number>();
+
+  /** Synchronous guard. true → attempt may proceed and OWNS the reservation; false → redundant no-op. */
+  reserve(tabId: number): boolean {
+    if (this.attached.has(tabId) || this.attaching.has(tabId)) return false;
+    this.attaching.add(tabId);
+    return true;
+  }
+
+  /** Attach succeeded → promote to attached. */
+  commit(tabId: number): void {
+    this.attached.add(tabId);
+  }
+
+  /** Genuine failure of the owning attempt → drop this tab's attached bookkeeping. */
+  fail(tabId: number): void {
+    this.attached.delete(tabId);
+  }
+
+  /** Release the reservation (finally) — owner only; a safe no-op otherwise. */
+  release(tabId: number): void {
+    this.attaching.delete(tabId);
+  }
+
+  isAttached(tabId: number): boolean {
+    return this.attached.has(tabId);
+  }
+
+  isAttaching(tabId: number): boolean {
+    return this.attaching.has(tabId);
+  }
+
+  get attachedCount(): number {
+    return this.attached.size;
+  }
+}
+
+/**
+ * Run a full attach transition with an injected attach fn, returning `'noop'`
+ * (redundant — reservation refused), `'attached'` (success), or `'failed'`
+ * (genuine failure). Mirrors EXACTLY the `reserve → attachFn → commit/fail →
+ * release` order of the real `attach()`, so a redundant call never invokes
+ * `attachFn` and therefore cannot delete live state.
+ */
+export async function runAttach(
+  reg: AttachRegistry,
+  tabId: number,
+  attachFn: (tabId: number) => Promise<void>,
+): Promise<'noop' | 'attached' | 'failed'> {
+  if (!reg.reserve(tabId)) return 'noop';
+  try {
+    await attachFn(tabId);
+    reg.commit(tabId);
+    return 'attached';
+  } catch {
+    reg.fail(tabId);
+    return 'failed';
+  } finally {
+    reg.release(tabId);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Bug 3 (extension-capture-bugfixes §4 Bug 3) — pure, chrome-free seams that
+// bound long-lived WebSocket capture. A long-lived WS `inFlight` entry is the
+// "oldest" by Map insertion order, so the generic INFLIGHT_LIMIT cap evicts it
+// and later frames/close are dropped silently; separately, per-request
+// `wsMessages` grows without bound on a chatty socket. `pickEvictionKey`
+// exempts open WS entries from the generic cap (evicting the oldest NON-WebSocket
+// entry instead), and `pushBounded` caps a per-request array to `max`
+// (drop-oldest). Both are unit-testable without chrome.*/CDP; DebuggerCapture
+// and background.ts adopt them internally in Tasks 4.2/4.3 without API changes.
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * Per-request cap on `wsMessages` (design §4 Bug 3). Without a bound, a chatty
+ * socket grows `wsMessages` without limit; 5000 frames per row is a predictable,
+ * documented memory ceiling (drop-oldest keeps the newest frames).
+ */
+export const MAX_WS_MESSAGES = 5000;
+
+/**
+ * Append `item` to `arr`, then drop the oldest entries so `arr.length <= max`
+ * (drop-oldest / rotate — the newest item is always retained). Mutates and
+ * returns `arr`. Used to bound per-request `wsMessages` in the WS sink.
+ */
+export function pushBounded<T>(arr: T[], item: T, max: number): T[] {
+  arr.push(item);
+  if (arr.length > max) arr.splice(0, arr.length - max); // drop oldest until <= max
+  return arr;
+}
+
+/**
+ * Pick the generic-eviction victim for the `inFlight` map: the FIRST (oldest by
+ * Map insertion order) NON-WebSocket key. Open WS entries stay in `inFlight`
+ * until `webSocketClosed`, so `type !== 'WebSocket'` is enough to exempt an open
+ * socket from the generic cap. Returns `undefined` when every entry is a
+ * WebSocket — the documented all-WS fallback: no eviction (let the map exceed
+ * the soft-cap briefly rather than drop a live socket; concurrent WS counts are
+ * small and each socket's frames are still bounded by MAX_WS_MESSAGES).
+ */
+export function pickEvictionKey(
+  entries: Iterable<{ key: string; type: ResourceType }>,
+): string | undefined {
+  for (const e of entries) if (e.type !== 'WebSocket') return e.key;
+  return undefined;
 }
 
 // Re-export captcha detector for use by both the extension and the desktop app.

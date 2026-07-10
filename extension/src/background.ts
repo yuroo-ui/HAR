@@ -15,7 +15,7 @@ import {
   setStickyTabs,
   setToken,
 } from './store.js';
-import { hostMatchesAllowlist } from '@har-suite/shared';
+import { hostMatchesAllowlist, pushBounded, MAX_WS_MESSAGES } from '@har-suite/shared';
 import type {
   CaptureScope,
   CapturedRequest,
@@ -139,7 +139,7 @@ const capture = new DebuggerCapture(
       const cur = recentRequests.get(id);
       if (cur) {
         cur.wsMessages = cur.wsMessages ?? [];
-        cur.wsMessages.push(message);
+        pushBounded(cur.wsMessages, message, MAX_WS_MESSAGES);
       }
       bridge.send({ kind: 'ws-message', id, message });
     },

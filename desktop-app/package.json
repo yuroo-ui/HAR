@@ -1,6 +1,6 @@
 {
   "name": "@har-suite/desktop-app",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "HAR Capture Suite Desktop App",
   "author": "HAR Capture Suite",
   "private": true,

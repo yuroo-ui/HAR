@@ -17,29 +17,29 @@ Two pieces:
 
 ## Features
 
-| Capability                           | Notes                                                                             |
-| ------------------------------------ | --------------------------------------------------------------------------------- |
-| Auto-capture across frames & workers | via `chrome.debugger` CDP flat sessions (`Target.setAutoAttach`)                  |
-| Configurable capture scope           | Data + navigations (default) or Everything (incl. static assets)                  |
-| Sticky-tab flow capture              | keep capturing across same-tab navigations to any domain                          |
-| Allowlist (with subdomain matching)  | configurable from extension popup and desktop app                                 |
-| Token-authenticated bridge           | only paired extensions can stream to the desktop                                  |
-| Service-worker keep-alive            | `chrome.alarms` heartbeat every ~25s                                              |
-| Recent-host suggestions              | popup shows recently visited hosts with one-click add                             |
-| Persistent sessions                  | SQLite via `better-sqlite3` (WAL mode)                                            |
-| Virtualized network list             | `@tanstack/react-virtual`, handles 10k+ rows                                      |
-| Inline waterfall                     | per-row offset/duration relative to session                                       |
-| Full-text search                     | URL/method/status, with optional body search                                      |
-| Request detail                       | headers, payload, response (with JSON pretty-print), WebSocket frames with filter |
-| Right-click context menu             | Copy URL · Copy as cURL · Copy as fetch · Export this only                        |
-| Import HAR                           | re-open existing captures                                                         |
-| Export HAR / ZIP                     | ZIP includes per-request JSON, summary, and metadata                              |
-| Sensitive-data redaction             | mask headers (Authorization, Cookie, etc.) and JSON body keys at export           |
-| CAPTCHA detection                    | recognizes sitekey + provider via network URLs, DOM scan, and page-world hooks    |
-| Dark / light theme                   | persisted to localStorage                                                         |
-| Vitest unit tests                    | for HAR, redaction, cURL, host matching, captcha detection                        |
-| ESLint + Prettier                    | flat config                                                                       |
-| electron-builder                     | NSIS / DMG / AppImage installer recipes                                           |
+| Capability                           | Notes                                                                                                                                        |
+| ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| Auto-capture across frames & workers | via `chrome.debugger` CDP flat sessions (`Target.setAutoAttach`)                                                                             |
+| Configurable capture scope           | Data + navigations (default) or Everything (incl. static assets)                                                                             |
+| Sticky-tab flow capture              | keep capturing across same-tab navigations to any domain                                                                                     |
+| Allowlist (with subdomain matching)  | configurable from extension popup and desktop app                                                                                            |
+| Token-authenticated bridge           | only paired extensions can stream to the desktop                                                                                             |
+| Service-worker keep-alive            | `chrome.alarms` heartbeat every ~25s                                                                                                         |
+| Recent-host suggestions              | popup shows recently visited hosts with one-click add                                                                                        |
+| Persistent sessions                  | SQLite via `better-sqlite3` (WAL mode)                                                                                                       |
+| Virtualized network list             | `@tanstack/react-virtual`, handles 10k+ rows                                                                                                 |
+| Inline waterfall                     | per-row offset/duration relative to session                                                                                                  |
+| Full-text search                     | URL/method/status, with optional body search                                                                                                 |
+| Request detail                       | headers, payload, response (with JSON pretty-print), WebSocket frames with filter                                                            |
+| Right-click context menu             | Copy URL · Copy as cURL · Copy as fetch · Export this only                                                                                   |
+| Import HAR                           | re-open existing captures                                                                                                                    |
+| Export HAR / ZIP                     | ZIP includes per-request JSON, summary, and metadata                                                                                         |
+| Sensitive-data redaction             | mask headers (Authorization, Cookie, etc.) and JSON body keys at export                                                                      |
+| CAPTCHA detection                    | recognizes sitekey + provider via network URLs, DOM scan, and page-world hooks                                                               |
+| Dark / light theme                   | persisted to localStorage                                                                                                                    |
+| Vitest unit tests                    | for HAR, redaction, cURL, host matching, resource-type inference, capture scope, process filter, captcha detection, and capture-bugfix seams |
+| ESLint + Prettier                    | flat config                                                                                                                                  |
+| electron-builder                     | NSIS / DMG / AppImage installer recipes                                                                                                      |
 
 ## Prerequisites
 
@@ -235,7 +235,8 @@ HAR/
 │   ├── har.test.ts
 │   ├── redact.test.ts
 │   ├── curl.test.ts
-│   └── host-match.test.ts
+│   ├── host-match.test.ts
+│   └── … (capture-scope, process-filter, captcha-detect, infer-resource-type, and bugfix seam tests)
 ├── eslint.config.mjs
 ├── vitest.config.ts
 ├── .prettierrc.json
@@ -275,6 +276,27 @@ npm run typecheck   # tsc --noEmit
 - Only one client (DevTools **or** this extension) can attach the debugger to a tab at a time. Close DevTools on tabs you want to capture.
 - Response bodies for very large or streamed responses may be unavailable from CDP. The HAR entry will still be present without the body.
 - MV3 service workers idle out after ~30 s. We use a `chrome.alarms` heartbeat (every 25 s) and event-driven re-attach to keep capture working, but you may briefly see a "disconnected" status during the wake.
+
+## Changelog
+
+### 0.1.2
+
+Capture reliability fixes.
+
+**Desktop app (native-app / MITM capture)**
+
+- `Clear` now deletes the active session's persisted requests from SQLite (previously they reloaded when the session was reopened).
+- Copy as cURL / fetch now applies the same redaction as export when redaction is enabled (secrets no longer copied in cleartext). Copy URL remains raw.
+- The global Capture toggle now also gates native-app/CLI (MITM) ingestion — turning capture off stops app traffic too, and the status reflects it.
+- Native-app WebSocket traffic through the MITM proxy is now captured (connection row + sent/received frames), matching the browser path.
+
+**Chrome extension (CDP capture)**
+
+- Request and WebSocket durations are now computed from a single monotonic time base — previously every extension-captured entry exported `time: 0` (epoch/monotonic mismatch).
+- Fixed a race in debugger `attach()` where two concurrent attach attempts on one navigation could delete a live attachment (hung debugger banner / re-attach loop).
+- Long-lived WebSockets: their in-flight entry is exempt from the generic eviction cap (frames no longer silently dropped on busy pages), and per-request `wsMessages` are bounded (`MAX_WS_MESSAGES`).
+- Binary/base64 fidelity: responses keep their real content-type with a separate base64 flag, and binary WebSocket frames are marked `encoding: base64` in the HAR (`_webSocketMessages`); legacy captures remain readable.
+- Extension manifest version aligned with the app version.
 
 ## Roadmap
 

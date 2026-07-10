@@ -1,6 +1,6 @@
 {
   "name": "har-capture-suite",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "Auto-capture FETCH/XHR/WebSocket requests from Chrome and export as HAR/ZIP",
   "workspaces": [

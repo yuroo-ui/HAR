@@ -39,7 +39,9 @@ function buildEntry(req: CapturedRequest) {
       }
     : undefined;
 
-  const isBase64 = req.responseMimeType === 'application/octet-stream;base64';
+  const isBase64 =
+    req.responseBodyBase64 === true || // new-style flag (real content-type retained)
+    req.responseMimeType === 'application/octet-stream;base64'; // legacy magic string
   const content: Record<string, unknown> = {
     size: req.responseSize ?? bodySizeOf(req.responseBody),
     mimeType: req.responseMimeType ?? '',
@@ -87,6 +89,7 @@ function buildEntry(req: CapturedRequest) {
             time: m.timestamp / 1000,
             opcode: m.opcode,
             data: m.payload,
+            ...(m.isBinary || m.opcode === 2 ? { encoding: 'base64' } : {}), // dual-path
           })),
         }
       : {}),

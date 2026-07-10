@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "HAR Capture Suite",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Auto-capture network traffic (incl. cross-origin iframes & workers) from allowlisted domains and stream to the desktop app",
   "permissions": ["debugger", "tabs", "storage", "webNavigation", "alarms", "scripting"],
   "web_accessible_resources": [
