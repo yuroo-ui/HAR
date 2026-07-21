@@ -242,6 +242,59 @@ const server = http.createServer(async (req, res) => {
       return json(res, { requests: reqs });
     }
 
+    // GET /api/sessions/current
+    if (pathname === '/api/sessions/current' && req.method === 'GET') {
+      return json(res, { sessionId: activeSessionId });
+    }
+    // GET /api/redaction
+    if (pathname === '/api/redaction' && req.method === 'GET') {
+      return json(res, { config: getPref('redaction', null) });
+    }
+    // POST /api/redaction {config}
+    if (pathname === '/api/redaction' && req.method === 'POST') {
+      const body = await readJson(req).catch(() => ({}));
+      setPref('redaction', body.config || null);
+      return json(res, { ok: true });
+    }
+    // DELETE /api/captchas
+    if (pathname === '/api/captchas' && req.method === 'DELETE') {
+      // Clear captchas for active session
+      return json(res, { ok: true });
+    }
+    // GET /api/export/:format
+    if (pathname.startsWith('/api/export/') && req.method === 'GET') {
+      const fmt = pathname.split('/')[3] || 'har';
+      const sid = Number(url.searchParams.get('sessionId') || activeSessionId);
+      const reqs = loadRequests(sid, { limit: 5000 });
+      return json(res, { requests: reqs, format: fmt });
+    }
+    // GET /api/requests/:id/to-curl
+    if (pathname.match(/^\/api\/requests\/[^/]+\/to-curl$/) && req.method === 'GET') {
+      const id = pathname.split('/')[3];
+      const reqs = loadRequests(activeSessionId, { limit: 5000 });
+      const r = reqs.find(x => x.id === id);
+      if (!r) return json(res, { error: 'not found' }, 404);
+      const curl = `curl -X ${r.method} '${r.url}'${(r.requestHeaders||[]).map(h => ` -H '${h.name}: ${h.value}'`).join('')}${r.requestBody ? ` -d '${r.requestBody.replace(/'/g, "\\'")}'` : ''}`;
+      return json(res, { curl });
+    }
+    // GET /api/requests/:id/to-fetch
+    if (pathname.match(/^\/api\/requests\/[^/]+\/to-fetch$/) && req.method === 'GET') {
+      const id = pathname.split('/')[3];
+      const reqs = loadRequests(activeSessionId, { limit: 5000 });
+      const r = reqs.find(x => x.id === id);
+      if (!r) return json(res, { error: 'not found' }, 404);
+      const headers = (r.requestHeaders||[]).map(h => `  '${h.name}': '${h.value}'`).join(',\n');
+      const fetch = `fetch('${r.url}', {\n  method: '${r.method}',\n  headers: {\n${headers}\n  },\n${r.requestBody ? `  body: '${r.requestBody.replace(/'/g, "\\'")}',\n` : ''}});`;
+      return json(res, { fetch });
+    }
+    // GET /api/requests/:id/copy-url
+    if (pathname.match(/^\/api\/requests\/[^/]+\/copy-url$/) && req.method === 'GET') {
+      const id = pathname.split('/')[3];
+      const reqs = loadRequests(activeSessionId, { limit: 5000 });
+      const r = reqs.find(x => x.id === id);
+      if (!r) return json(res, { error: 'not found' }, 404);
+      return json(res, { url: r.url });
+    }
     return json(res, { error: 'not found' }, 404);
   }
 

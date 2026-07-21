@@ -5,29 +5,29 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>HAR Capture Suite — Remote</title>
     <script>
-      // Web shim: provide window.harSuite API that desktop-app renderer expects
-      // Talks to the capture server via HTTP REST + WebSocket
+      // Web shim: replicate Electron preload API (window.harSuite)
       (function () {
         const API = location.origin;
         const WS_URL = API.replace(/^http/, 'ws') + '/ws';
-        let ws = null;
         const listeners = {};
-        function on(event, cb) {
-          (listeners[event] = listeners[event] || []).push(cb);
-        }
-        function off(event, cb) {
-          const arr = listeners[event];
-          if (arr) listeners[event] = arr.filter((fn) => fn !== cb);
-        }
-        function emit(event, data) {
-          for (const fn of listeners[event] || []) fn(data);
-        }
+        function on(e, cb) { (listeners[e] = listeners[e] || []).push(cb); }
+        function off(e, cb) { if (listeners[e]) listeners[e] = listeners[e].filter(f => f !== cb); }
+        function emit(e, d) { for (const f of listeners[e] || []) f(d); }
+
+        let ws;
         function connectWs() {
           ws = new WebSocket(WS_URL);
           ws.onmessage = (e) => {
             try {
-              const msg = JSON.parse(e.data);
-              emit(msg.type, msg);
+              const m = JSON.parse(e.data);
+              if (m.type === 'request') emit('capture:request', m.request);
+              else if (m.type === 'update') emit('capture:update', m);
+              else if (m.type === 'ws-message') emit('capture:ws-message', m);
+              else if (m.type === 'status') emit('capture:status', m);
+              else if (m.type === 'connection') emit('capture:connection', m);
+              else if (m.type === 'cleared') emit('capture:cleared', m);
+              else if (m.type === 'reloaded') emit('capture:reloaded', m);
+              else if (m.type === 'captcha') emit('capture:captcha', m);
             } catch {}
           };
           ws.onclose = () => setTimeout(connectWs, 2000);
@@ -37,44 +37,65 @@
 
         async function api(path, opts) {
           const r = await fetch(API + path, opts);
+          if (!r.ok) throw new Error('HTTP ' + r.status);
           return r.json();
         }
 
+        const stub = (val) => () => Promise.resolve(val);
+        const STUB_APP = { enabled: false, port: 0, proxyActive: false, supported: false };
+        const STUB_CLI = { proxyRunning: false, globalEnvActive: false, commandRunning: false, supported: false };
+        const STUB_FILTER = { exeNames: [], bypass: false, seenExes: [], runningProcesses: [] };
+
         window.harSuite = {
-          on,
-          off,
-          invoke: async (channel, ...args) => {
-            // Map Electron IPC channels to REST API
-            if (channel === 'capture:get-state') return api('/api/status');
-            if (channel === 'capture:set-enabled') return api('/api/capture', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: args[0] }) });
-            if (channel === 'capture:set-scope') return api('/api/capture', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scope: args[0] }) });
-            if (channel === 'capture:export-har') return api('/api/export/har');
-            if (channel === 'capture:export-ndjson') return api('/api/export/ndjson');
-            if (channel === 'capture:clear') return api('/api/requests', { method: 'DELETE' });
-            if (channel === 'capture:set-allowlist') return api('/api/allowlist', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ domains: args[0] }) });
-            if (channel === 'capture:set-sticky') return api('/api/capture/sticky', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tabId: args[0], sticky: args[1] }) });
-            if (channel === 'request:detail') return api('/api/requests/' + args[0]);
-            if (channel === 'request:body') return api('/api/requests/' + args[0] + '/body');
-            if (channel === 'request:response-body') return api('/api/requests/' + args[0] + '/response-body');
-            if (channel === 'request:ws-messages') return api('/api/requests/' + args[0] + '/ws-messages');
-            if (channel === 'request:delete') return api('/api/requests/' + args[0], { method: 'DELETE' });
-            if (channel === 'sessions:list') return api('/api/sessions');
-            if (channel === 'sessions:create') return api('/api/sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: args[0] }) });
-            if (channel === 'sessions:open') return api('/api/sessions/' + args[0] + '/open', { method: 'POST' });
-            if (channel === 'sessions:close') return api('/api/sessions/' + args[0] + '/close', { method: 'POST' });
-            if (channel === 'sessions:delete') return api('/api/sessions/' + args[0], { method: 'DELETE' });
-            if (channel === 'sessions:export') return api('/api/sessions/' + args[0] + '/export');
-            if (channel === 'bridge:status') return api('/api/status');
-            if (channel === 'bridge:reconnect') return api('/api/bridge/reconnect', { method: 'POST' });
-            if (channel === 'bridge:set-token') return api('/api/token', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: args[0] }) });
-            if (channel === 'redaction:get') return api('/api/redaction');
-            if (channel === 'redaction:set') return api('/api/redaction', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: args[0] }) });
-            if (channel === 'captchas:list') return api('/api/captchas');
-            if (channel === 'captchas:delete') return api('/api/captchas/' + args[0], { method: 'DELETE' });
-            if (channel === 'captchas:clear') return api('/api/captchas', { method: 'DELETE' });
-            console.warn('[shim] unhandled invoke:', channel, args);
-            return null;
-          },
+          // Data
+          getAll: () => api('/api/requests').then(d => d.requests || []),
+          clear: () => api('/api/requests', { method: 'DELETE' }).then(() => true),
+          getStatus: () => api('/api/status'),
+          setAllowlist: (domains) => api('/api/allowlist', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ domains }) }),
+          setCapture: (enabled) => api('/api/capture', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled }) }),
+          setScope: (scope) => api('/api/capture', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scope }) }),
+          setRedaction: (cfg) => api('/api/redaction', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: cfg }) }),
+          regenerateToken: () => api('/api/token/regenerate', { method: 'POST' }).then(d => d.token),
+          // App capture (desktop only)
+          setAppCapture: stub({ ok: false, error: 'Not available in web mode' }),
+          getAppCaptureStatus: stub(STUB_APP),
+          // CLI (desktop only)
+          runCommand: stub({ ok: false, error: 'Not available in web mode' }),
+          cancelCommand: stub(false),
+          setGlobalEnv: stub({ ok: false, error: 'Not available in web mode' }),
+          getCliStatus: stub(STUB_CLI),
+          getAppFilter: stub(STUB_FILTER),
+          setAppFilter: stub(false),
+          // Export
+          exportData: (fmt) => api('/api/export?format=' + fmt),
+          importHar: stub({ ok: false, error: 'Not available in web mode' }),
+          toCurl: (id) => api('/api/requests/' + id + '/to-curl'),
+          toFetch: (id) => api('/api/requests/' + id + '/to-fetch'),
+          copyUrl: (id) => api('/api/requests/' + id + '/copy-url'),
+          // Captchas
+          getCaptchas: () => api('/api/captchas').then(d => d.captchas || []),
+          clearCaptchas: () => api('/api/captchas', { method: 'DELETE' }).then(() => true),
+          copySitekey: stub(null),
+          // Sessions
+          listSessions: () => api('/api/sessions').then(d => d.sessions || []),
+          currentSession: () => api('/api/sessions/current').then(d => d.sessionId),
+          newSession: (name) => api('/api/sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) }).then(d => d.id),
+          openSession: (id) => api('/api/sessions/' + id + '/open', { method: 'POST' }).then(d => d.sessionId),
+          deleteSession: (id) => api('/api/sessions/' + id, { method: 'DELETE' }).then(() => true),
+          renameSession: (id, name) => api('/api/sessions/' + id + '/rename', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) }).then(() => true),
+          // Event listeners
+          onRequest: (cb) => { on('capture:request', cb); return () => off('capture:request', cb); },
+          onUpdate: (cb) => { const h = (p) => cb(p.id, p.patch); on('capture:update', h); return () => off('capture:update', h); },
+          onWsMessage: (cb) => { const h = (p) => cb(p.id, p.message); on('capture:ws-message', h); return () => off('capture:ws-message', h); },
+          onStatus: (cb) => { on('capture:status', cb); return () => off('capture:status', cb); },
+          onAppCaptureStatus: (cb) => { on('capture:app-status', cb); return () => off('capture:app-status', cb); },
+          onCliStatus: (cb) => { on('capture:cli-status', cb); return () => off('capture:cli-status', cb); },
+          onCommandOutput: (cb) => { on('capture:command-output', cb); return () => off('capture:command-output', cb); },
+          onConnection: (cb) => { on('capture:connection', cb); return () => off('capture:connection', cb); },
+          onCleared: (cb) => { on('capture:cleared', cb); return () => off('capture:cleared', cb); },
+          onReloaded: (cb) => { on('capture:reloaded', cb); return () => off('capture:reloaded', cb); },
+          onCaptcha: (cb) => { on('capture:captcha', cb); return () => off('capture:captcha', cb); },
+          onAppFilterChanged: (cb) => { on('capture:app-filter-changed', cb); return () => off('capture:app-filter-changed', cb); },
         };
       })();
     </script>
