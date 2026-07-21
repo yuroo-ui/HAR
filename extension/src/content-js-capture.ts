@@ -33,12 +33,12 @@ type JsCaptureEvent = {
 };
 
 const MAX_CODE_LENGTH = 4096;
-const W = window as unknown as { __harSuiteJsCapture?: boolean };
+const _W = window as unknown as { __harSuiteJsCapture?: boolean };
 
-if (W.__harSuiteJsCapture) {
+if (_W.__harSuiteJsCapture) {
   // Already running — skip.
 } else {
-  W.__harSuiteJsCapture = true;
+  _W.__harSuiteJsCapture = true;
 
   function send(event: JsCaptureEvent) {
     try {
@@ -145,8 +145,8 @@ if (W.__harSuiteJsCapture) {
   Object.defineProperty(window.eval, 'toString', { value: () => 'function eval() { [native code] }' });
 
   const OrigFunction = Function;
-  function CapturedFunction(...args: string[]) {
-    const body = args[args.length - 1];
+  function CapturedFunction(this: unknown, ...args: string[]): unknown {
+    const body = args.length > 0 ? args[args.length - 1] : '';
     send({
       kind: 'js-capture',
       subtype: 'function-constructor',
@@ -154,7 +154,7 @@ if (W.__harSuiteJsCapture) {
       timestamp: Date.now(),
       pageUrl,
     });
-    return new OrigFunction(...args);
+    return new (OrigFunction as any)(...args);
   }
   CapturedFunction.prototype = OrigFunction.prototype;
   Object.defineProperty(CapturedFunction, 'toString', { value: () => 'function Function() { [native code] }' });
@@ -242,7 +242,7 @@ if (W.__harSuiteJsCapture) {
     let reqUrl: string;
     let reqMethod: string;
 
-    xhr.open = function (method: string, url: string | URL, ...rest: any[]) {
+    xhr.open = function (method: string, url: string | URL, async?: boolean, user?: string, password?: string) {
       reqMethod = method;
       reqUrl = typeof url === 'string' ? url : url.href;
       send({
@@ -253,7 +253,7 @@ if (W.__harSuiteJsCapture) {
         timestamp: Date.now(),
         pageUrl,
       });
-      return origOpen(method, url, ...rest);
+      return origOpen(method, url, async ?? true, user, password);
     };
 
     xhr.send = function (body?: Document | XMLHttpRequestBodyInit | null) {
@@ -368,7 +368,7 @@ if (W.__harSuiteJsCapture) {
   window.Worker.prototype = OrigWorker.prototype;
 
   if (OrigSharedWorker) {
-    window.SharedWorker = function (scriptURL: string | URL, name?: string | SharedWorkerOptions) {
+    (window as any).SharedWorker = function (scriptURL: string | URL, name?: string | WorkerOptions) {
       send({
         kind: 'js-capture',
         subtype: 'worker-created',
@@ -376,9 +376,9 @@ if (W.__harSuiteJsCapture) {
         timestamp: Date.now(),
         pageUrl,
       });
-      return new OrigSharedWorker(scriptURL, name);
-    } as any;
-    window.SharedWorker.prototype = OrigSharedWorker.prototype;
+      return new (OrigSharedWorker as any)(scriptURL, name);
+    };
+    (window as any).SharedWorker.prototype = OrigSharedWorker.prototype;
   }
 
   console.log('[HAR Suite] JS capture active — inline scripts, eval, fetch/XHR, beacon, workers');
