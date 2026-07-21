@@ -24,6 +24,11 @@ export type ResourceType =
   | 'CSPViolationReport'
   | 'Preflight'
   | 'FedCM'
+  | 'InlineScript'
+  | 'Eval'
+  | 'Beacon'
+  | 'ServiceWorker'
+  | 'WebWorker'
   | 'Other';
 
 export const CDP_RESOURCE_TYPES: ReadonlySet<ResourceType> = new Set<ResourceType>([

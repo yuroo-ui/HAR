@@ -268,6 +268,11 @@ async function injectCaptchaScanner(tabId: number, url: string) {
       target: { tabId, allFrames: true },
       files: ['content-captcha.js'],
     });
+    // Also inject the JS capture script for inline/eval/fetch/XHR/beacon capture
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      files: ['content-js-capture.js'],
+    });
     injectedScanner.set(tabId, url);
   } catch {
     // chrome://, about:, file:// etc. reject injection — that's fine.
@@ -435,6 +440,42 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         detectedAt: Date.now(),
         tabId,
         extra: msg.extra,
+      });
+      sendResponse({ ok: true });
+    } else if (msg?.kind === 'js-capture') {
+      // JS capture events from content-js-capture.ts
+      // Forward to desktop app via bridge as a synthetic request-like event
+      const tabId = _sender.tab?.id ?? -1;
+      const pageUrl = _sender.tab?.url ?? msg.pageUrl ?? '';
+      let pageHost = '';
+      try {
+        pageHost = pageUrl ? new URL(pageUrl).host : '';
+      } catch {}
+      const allowlist = await getAllowlist();
+      const allowed =
+        (pageHost && hostMatchesAllowlist(pageHost, allowlist)) ||
+        (tabId >= 0 && (stickyTabs.has(tabId) || capture.isAttached(tabId)));
+      if (!allowed) {
+        sendResponse({ ok: false, error: 'host-not-allowlisted' });
+        return;
+      }
+      // Forward JS capture event as a bridge message
+      bridge.send({
+        kind: 'request',
+        payload: {
+          id: `js:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
+          tabId,
+          source: 'web',
+          type: 'Script',
+          method: msg.method ?? 'JS',
+          url: msg.url ?? `inline://${msg.subtype}`,
+          host: pageHost,
+          startedAt: msg.timestamp ?? Date.now(),
+          requestHeaders: [],
+          requestBody: msg.code ?? msg.body ?? '',
+          responseHeaders: [],
+          initiator: msg.subtype,
+        },
       });
       sendResponse({ ok: true });
     } else {
