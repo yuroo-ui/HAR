@@ -17,6 +17,8 @@ export class Bridge {
   private authed = false;
   private authTimer: number | null = null;
 
+  private keepAliveTimer: number | null = null;
+
   constructor(getToken: () => Promise<string>, getUrl?: () => string) {
     this.getToken = getToken;
     this.getUrl = getUrl || (() => `ws://${BRIDGE_HOST}:${BRIDGE_PORT}`);
@@ -114,6 +116,8 @@ export class Bridge {
             this.authTimer = null;
           }
           console.log('[bridge] authenticated', url);
+          // Start keepalive to prevent Chrome from killing service worker
+          this.startKeepAlive();
           const drain = this.queue.splice(0);
           for (const m of drain) this.send(m);
           for (const fn of this.authHandlers) {
@@ -139,6 +143,7 @@ export class Bridge {
     });
 
     socket.addEventListener('close', () => {
+      this.stopKeepAlive();
       // Only reset state if this socket is still the current one.
       if (this.ws === socket) {
         this.ws = null;
@@ -164,5 +169,22 @@ export class Bridge {
       this.connectTimer = null;
       this.connect();
     }, RECONNECT_MS);
+  }
+
+  private startKeepAlive() {
+    this.stopKeepAlive();
+    // Ping every 25s to keep service worker alive and detect dead connections
+    this.keepAliveTimer = self.setInterval(() => {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        try { this.ws.send(JSON.stringify({ kind: 'ping' })); } catch {}
+      }
+    }, 25000);
+  }
+
+  private stopKeepAlive() {
+    if (this.keepAliveTimer != null) {
+      clearInterval(this.keepAliveTimer);
+      this.keepAliveTimer = null;
+    }
   }
 }

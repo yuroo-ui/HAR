@@ -414,7 +414,10 @@ wssBridge.on('connection', (ws) => {
 
     // Authed messages from extension → broadcast to UI and persist
     const k = msg?.kind;
-    if (k === 'request') {
+    if (k === 'ping') {
+      // Keepalive from extension, just acknowledge
+      try { ws.send(JSON.stringify({ kind: 'pong' })); } catch {}
+    } else if (k === 'request') {
       const req = msg.payload;
       try {
         saveRequest(activeSessionId, req);
