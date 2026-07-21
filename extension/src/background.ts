@@ -28,10 +28,7 @@ import { detectFromUrl, stableId } from './captcha-detector.js';
 
 const KEEP_ALIVE_ALARM = 'bridge-keepalive';
 
-const localBridge = new Bridge(async () => await getToken());
-
-// Remote bridge uses dynamic URL so user can change endpoint without build.
-// Defaults to wss://capture.eemaill.codes/bridge/ws (Cloudflare proxied to this server).
+// Remote bridge only — no local desktop app in web/mobile mode
 let remoteUrlCache = '';
 
 const remoteBridge = new Bridge(
@@ -49,45 +46,23 @@ chrome.storage.onChanged?.addListener((changes, area) => {
     const enabled = changes.remoteEnabled.newValue;
     if (enabled) remoteBridge.start();
   }
-  // Also restart on token change
   if (changes.remoteBridgeToken) {
     remoteBridge.forceReconnect();
   }
 });
 
-// Auto-start remote bridge on install (default enabled)
+// Auto-start remote bridge on install
 getRemoteEnabled().then((enabled) => {
-  if (enabled !== false) remoteBridge.start(); // start unless explicitly disabled
-}).catch(() => { remoteBridge.start(); }); // default: start
-
-function combinedSend(msg: import('@har-suite/shared').BridgeMessage) {
-  localBridge.send(msg);
-  getRemoteEnabled()
-    .then((enabled) => { if (enabled) remoteBridge.send(msg); })
-    .catch(() => {});
-}
+  if (enabled !== false) remoteBridge.start();
+}).catch(() => { remoteBridge.start(); });
 
 const bridge = {
-  start() {
-    localBridge.start();
-    getRemoteEnabled()
-      .then((e) => { if (e) remoteBridge.start(); })
-      .catch(() => {});
-  },
-  onMessage(fn: Parameters<typeof localBridge.onMessage>[0]) {
-    localBridge.onMessage(fn);
-    remoteBridge.onMessage(fn);
-  },
-  onAuthenticated(fn: Parameters<typeof localBridge.onAuthenticated>[0]) {
-    localBridge.onAuthenticated(fn);
-    remoteBridge.onAuthenticated(fn);
-  },
-  send: combinedSend,
-  isOpen: () => localBridge.isOpen() || remoteBridge.isOpen(),
-  forceReconnect() {
-    localBridge.forceReconnect();
-    remoteBridge.forceReconnect();
-  },
+  start() { remoteBridge.start(); },
+  onMessage(fn: Parameters<typeof remoteBridge.onMessage>[0]) { remoteBridge.onMessage(fn); },
+  onAuthenticated(fn: Parameters<typeof remoteBridge.onAuthenticated>[0]) { remoteBridge.onAuthenticated(fn); },
+  send(msg: import('@har-suite/shared').BridgeMessage) { remoteBridge.send(msg); },
+  isOpen: () => remoteBridge.isOpen(),
+  forceReconnect() { remoteBridge.forceReconnect(); },
 };
 
 
