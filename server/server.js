@@ -261,6 +261,49 @@ const server = http.createServer(async (req, res) => {
       // Clear captchas for active session
       return json(res, { ok: true });
     }
+    // GET /api/bridge/poll — HTTP polling fallback for extensions that can't use WebSocket
+    if (pathname === '/api/bridge/poll' && req.method === 'GET') {
+      const token = url.searchParams.get('token') || '';
+      if (bridgeToken && token !== bridgeToken) {
+        return json(res, { error: 'invalid token' }, 401);
+      }
+      return json(res, {
+        ok: true,
+        allowlist: getPref('allowlist', []),
+        captureEnabled: getPref('captureEnabled', true),
+        scope: getPref('scope', 'data'),
+        sessionId: activeSessionId,
+        connected: true,
+      });
+    }
+    // POST /api/bridge/send — HTTP send fallback for extensions
+    if (pathname === '/api/bridge/send' && req.method === 'POST') {
+      const body = await readJson(req).catch(() => ({}));
+      const token = body.token || url.searchParams.get('token') || '';
+      if (bridgeToken && token !== bridgeToken) {
+        return json(res, { error: 'invalid token' }, 401);
+      }
+      // Process the message same as WS bridge
+      const k = body.kind;
+      if (k === 'request') {
+        const req2 = body.payload;
+        try { saveRequest(activeSessionId, req2); } catch (e) { console.warn('[store] saveRequest', e.message); }
+        broadcastToUi({ type: 'request', request: req2 });
+      } else if (k === 'request-update') {
+        const { id, patch } = body;
+        try { updateRequest(activeSessionId, id, patch); } catch {}
+        broadcastToUi({ type: 'update', id, patch });
+      } else if (k === 'ws-message') {
+        const { id, message } = body;
+        try { appendWsMessage(activeSessionId, id, message); } catch {}
+        broadcastToUi({ type: 'ws-message', id, message });
+      } else if (k === 'captcha-detected') {
+        const det = body.payload;
+        try { saveCaptcha(activeSessionId, det); } catch (e) { console.warn('[store] captcha', e.message); }
+        broadcastToUi({ type: 'captcha', captcha: det });
+      }
+      return json(res, { ok: true });
+    }
     // GET /api/export/:format
     if (pathname.startsWith('/api/export/') && req.method === 'GET') {
       const fmt = pathname.split('/')[3] || 'har';
@@ -339,6 +382,7 @@ const wssUi = new WebSocketServer({ noServer: true, path: '/ws' });
 
 server.on('upgrade', (req, socket, head) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
+  console.log('[ws] upgrade request:', url.pathname, 'from:', req.headers['x-forwarded-for'] || req.socket.remoteAddress);
   if (url.pathname === '/bridge/ws') {
     wssBridge.handleUpgrade(req, socket, head, (ws) => wssBridge.emit('connection', ws, req));
   } else if (url.pathname === '/ws') {

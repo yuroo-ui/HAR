@@ -116,8 +116,11 @@ async function render(state: State) {
     if (tokenEl.value !== fromState) tokenEl.value = fromState;
   }
 
+  // Show connection status based on bridge state
+  const hasToken = !!(state.token || '').trim();
+  
   $('conn').innerHTML = `<span class="dot ${state.connected ? 'on' : 'off'}"></span>${
-    state.connected ? 'Paired' : state.token ? 'Reconnecting…' : 'Not paired'
+    state.connected ? 'Connected' : hasToken ? 'Connecting…' : 'No token'
   }`;
   $('status').innerHTML = `<span class="dot ${state.capturing ? 'on' : 'off'}"></span>${
     state.capturing

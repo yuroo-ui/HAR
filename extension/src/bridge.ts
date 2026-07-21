@@ -16,8 +16,8 @@ export class Bridge {
   private getUrl: () => string;
   private authed = false;
   private authTimer: number | null = null;
-
   private keepAliveTimer: number | null = null;
+  private usePolling = false;
 
   constructor(getToken: () => Promise<string>, getUrl?: () => string) {
     this.getToken = getToken;
@@ -37,6 +37,11 @@ export class Bridge {
   }
 
   send(msg: BridgeMessage) {
+    if (this.usePolling) {
+      // HTTP polling mode: send via POST
+      this.sendViaHttp(msg);
+      return;
+    }
     if (this.ws && this.ws.readyState === WebSocket.OPEN && this.authed) {
       try {
         this.ws.send(JSON.stringify(msg));
@@ -50,13 +55,16 @@ export class Bridge {
   }
 
   isOpen() {
+    if (this.usePolling) return this.authed;
     return this.authed && this.ws?.readyState === WebSocket.OPEN;
   }
 
   forceReconnect() {
+    this.stopPolling();
     const old = this.ws;
     this.ws = null;
     this.authed = false;
+    this.usePolling = false;
     if (this.authTimer != null) {
       clearTimeout(this.authTimer);
       this.authTimer = null;
@@ -70,21 +78,31 @@ export class Bridge {
   }
 
   private async connect() {
-    if (this.ws) return;
+    if (this.ws || this.usePolling) return;
     const url = this.getUrl();
     let socket: WebSocket;
     try {
       socket = new WebSocket(url);
     } catch (e) {
       console.warn('[bridge] cannot open', url, e);
-      this.scheduleReconnect();
+      this.fallbackToPolling();
       return;
     }
     this.ws = socket;
 
+    // If WebSocket doesn't open within 5s, fallback to polling
+    const openTimeout = self.setTimeout(() => {
+      if (this.ws === socket && !this.authed) {
+        console.warn('[bridge] ws open timeout, falling back to HTTP polling');
+        try { socket.close(); } catch {}
+        this.ws = null;
+        this.fallbackToPolling();
+      }
+    }, 5000);
+
     socket.addEventListener('open', async () => {
-      // Guard: if a forceReconnect raced us, this socket is no longer current.
       if (this.ws !== socket) return;
+      clearTimeout(openTimeout);
       const token = await this.getToken();
       const auth: BridgeMessage = {
         kind: 'auth',
@@ -106,7 +124,7 @@ export class Bridge {
     });
 
     socket.addEventListener('message', (ev) => {
-      if (this.ws !== socket) return; // stale socket
+      if (this.ws !== socket) return;
       try {
         const parsed = JSON.parse(ev.data) as BridgeMessage;
         if (parsed.kind === 'auth-ok') {
@@ -116,7 +134,6 @@ export class Bridge {
             this.authTimer = null;
           }
           console.log('[bridge] authenticated', url);
-          // Start keepalive to prevent Chrome from killing service worker
           this.startKeepAlive();
           const drain = this.queue.splice(0);
           for (const m of drain) this.send(m);
@@ -144,7 +161,6 @@ export class Bridge {
 
     socket.addEventListener('close', () => {
       this.stopKeepAlive();
-      // Only reset state if this socket is still the current one.
       if (this.ws === socket) {
         this.ws = null;
         this.authed = false;
@@ -163,6 +179,63 @@ export class Bridge {
     });
   }
 
+  // HTTP polling fallback for environments where WebSocket doesn't work (e.g. Chrome Android extensions)
+  private async fallbackToPolling() {
+    if (this.usePolling) return;
+    this.usePolling = true;
+    const url = this.getUrl();
+    const serverUrl = url.replace(/^wss?:\/\//, 'https://').replace(/\/bridge\/ws$/, '');
+    const token = await this.getToken();
+
+    console.log('[bridge] using HTTP polling to', serverUrl);
+
+    // Verify connection
+    try {
+      const resp = await fetch(`${serverUrl}/api/bridge/poll?token=${encodeURIComponent(token)}`);
+      if (!resp.ok) {
+        console.warn('[bridge] HTTP poll auth failed');
+        this.usePolling = false;
+        this.scheduleReconnect();
+        return;
+      }
+    } catch (e) {
+      console.warn('[bridge] HTTP poll failed', e);
+      this.usePolling = false;
+      this.scheduleReconnect();
+      return;
+    }
+
+    this.authed = true;
+    console.log('[bridge] HTTP polling authenticated');
+    for (const fn of this.authHandlers) {
+      try { fn(); } catch {}
+    }
+
+    // Drain queue
+    const drain = this.queue.splice(0);
+    for (const m of drain) this.sendViaHttp(m);
+  }
+
+  private async sendViaHttp(msg: BridgeMessage) {
+    const url = this.getUrl();
+    const serverUrl = url.replace(/^wss?:\/\//, 'https://').replace(/\/bridge\/ws$/, '');
+    const token = await this.getToken();
+    try {
+      await fetch(`${serverUrl}/api/bridge/send`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...msg, token }),
+      });
+    } catch (e) {
+      console.warn('[bridge] HTTP send failed', e);
+      if (this.queue.length < 2000) this.queue.push(msg);
+    }
+  }
+
+  private stopPolling() {
+    this.usePolling = false;
+  }
+
   private scheduleReconnect() {
     if (this.connectTimer != null) return;
     this.connectTimer = self.setTimeout(() => {
@@ -173,7 +246,6 @@ export class Bridge {
 
   private startKeepAlive() {
     this.stopKeepAlive();
-    // Ping every 25s to keep service worker alive and detect dead connections
     this.keepAliveTimer = self.setInterval(() => {
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         try { this.ws.send(JSON.stringify({ kind: 'ping' })); } catch {}
