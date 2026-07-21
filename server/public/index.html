@@ -1,293 +1,87 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>HAR Capture Suite — Remote</title>
-  <script src="/shim.js"></script>
-  <style>
-    :root{--bg:#15171c;--bg-panel:#1b1e24;--bg-elev:#20242b;--bg-pre:#0e1014;--border:#2c313a;--text:#e8eaed;--text-dim:#9aa0aa;--text-mute:#646b76;--accent:#3b82f6;--row-hover:#232830;--row-selected:#1e3a5f;--good:#34d399;--bad:#f87171}
-    *{box-sizing:border-box}body{font-family:system-ui,sans-serif;background:var(--bg);color:var(--text);margin:0;padding:0;height:100vh;display:flex;flex-direction:column}
-    header{background:var(--bg-panel);border-bottom:1px solid var(--border);padding:12px 20px;display:flex;align-items:center;justify-content:space-between}
-    header h1{font-size:16px;font-weight:650;margin:0;display:flex;align-items:center;gap:8px}
-    header h1 .logo{width:18px;height:18px;border-radius:5px;background:linear-gradient(135deg,#3b82f6,#8b5cf6);display:inline-block}
-    .pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;padding:4px 10px;border-radius:20px;background:var(--bg-elev);border:1px solid var(--border)}
-    .pill .dot{width:8px;height:8px;border-radius:50%}
-    .pill .dot.on{background:var(--good)}.pill .dot.off{background:var(--bad)}
-    .toolbar{background:var(--bg-panel);border-bottom:1px solid var(--border);padding:8px 20px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-    .toolbar input[type=text]{background:var(--bg-pre);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px;font-size:13px;width:260px}
-    .toolbar input:focus{outline:none;border-color:var(--accent)}
-    .toolbar select{background:var(--bg-pre);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px;font-size:13px}
-    .toolbar button{background:var(--accent);color:#fff;border:0;padding:6px 14px;border-radius:6px;font-size:12px;cursor:pointer;font-weight:550}
-    .toolbar button:hover{opacity:.9}
-    .toolbar button.secondary{background:var(--bg-elev);color:var(--text);border:1px solid var(--border)}
-    .main{display:flex;flex:1;overflow:hidden}
-    .list{flex:1;overflow:auto;border-right:1px solid var(--border)}
-    .detail{width:50%;overflow:auto;background:var(--bg-panel)}
-    table{width:100%;border-collapse:collapse;font-size:12.5px}
-    thead th{position:sticky;top:0;background:var(--bg-panel);text-align:left;padding:6px 10px;border-bottom:1px solid var(--border);color:var(--text-dim);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.04em}
-    tbody tr{cursor:pointer;border-bottom:1px solid var(--border)}
-    tbody tr:hover{background:var(--row-hover)}
-    tbody tr.selected{background:var(--row-selected)}
-    td{padding:5px 10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:400px}
-    td.method{font-weight:600;font-size:11px;text-transform:uppercase;color:var(--accent)}
-    td.status2{color:var(--good)}.status3{color:var(--text-dim)}.status4{color:var(--bad)}.status5{color:var(--bad)}
-    td.host{color:var(--text-dim);max-width:200px}
-    td.type{color:var(--text-mute);font-size:11px}
-    .detail-header{padding:16px 20px;border-bottom:1px solid var(--border)}
-    .detail-header h2{margin:0 0 6px;font-size:14px;font-weight:650}
-    .detail-header .meta{color:var(--text-dim);font-size:12px;display:flex;gap:12px;flex-wrap:wrap}
-    .tabs{display:flex;border-bottom:1px solid var(--border);background:var(--bg-panel)}
-    .tabs button{background:0;border:0;color:var(--text-dim);padding:8px 16px;cursor:pointer;font-size:12px;border-bottom:2px solid transparent}
-    .tabs button.active{color:var(--text);border-bottom-color:var(--accent)}
-    .tab-content{padding:16px 20px}
-    pre{background:var(--bg-pre);padding:12px;border-radius:8px;overflow:auto;font-size:11.5px;line-height:1.5;max-height:50vh}
-    .kv{font-size:12px}.kv td{padding:4px 8px;border-bottom:1px solid var(--border)}.kv td:first-child{color:var(--text-dim);font-weight:550;width:200px;max-width:200px}
-    .empty{color:var(--text-mute);text-align:center;padding:60px 20px;font-size:14px}
-    .session-bar{background:var(--bg-elev);border-bottom:1px solid var(--border);padding:6px 20px;display:flex;gap:8px;align-items:center;font-size:12px}
-    .session-bar select{background:var(--bg-pre);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:4px;font-size:12px}
-    .status-bar{background:var(--bg-panel);border-top:1px solid var(--border);padding:6px 20px;font-size:11px;color:var(--text-dim);display:flex;justify-content:space-between}
-    .badge{display:inline-block;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:600}
-    .badge-blue{background:#1e3a5f;color:#60a5fa}.badge-green{background:#064e3b;color:#34d399}
-    .captcha-row{background:#1a1030 !important}
-  </style>
-</head>
-<body>
-  <header>
-    <h1><span class="logo"></span> HAR Capture Suite</h1>
-    <div style="display:flex;gap:10px;align-items:center">
-      <span class="pill"><span class="dot" id="conn-dot"></span><span id="conn-text">—</span></span>
-      <span class="pill"><span class="dot" id="cap-dot"></span><span id="cap-text">—</span></span>
-      <a href="https://github.com/yuroo-ui/HAR" target="_blank" style="color:var(--text-dim);font-size:11px;text-decoration:none">GitHub</a>
-    </div>
-  </header>
-  <div class="session-bar">
-    <span style="color:var(--text-dim)">Session:</span>
-    <select id="session-select"></select>
-    <button class="secondary" onclick="newSession()" style="font-size:11px">+ New</button>
-    <span style="flex:1"></span>
-    <span id="req-count" style="color:var(--text-dim)">0 requests</span>
-  </div>
-  <div class="toolbar">
-    <input type="text" id="search" placeholder="Filter by URL, host, method...">
-    <select id="type-filter">
-      <option value="">All types</option>
-      <option>Document</option><option>Script</option><option>XHR</option><option>Fetch</option>
-      <option>WebSocket</option><option>Image</option><option>InlineScript</option><option>Eval</option>
-      <option>Beacon</option><option>ServiceWorker</option><option>WebWorker</option>
-    </select>
-    <button onclick="clearRequests()">Clear</button>
-    <button class="secondary" onclick="exportHAR()">Export HAR</button>
-    <span style="flex:1"></span>
-    <span id="auto-scroll" style="color:var(--text-mute);font-size:11px;cursor:pointer" onclick="toggleScroll()">Auto-scroll: ON</span>
-  </div>
-  <div class="main">
-    <div class="list" id="list">
-      <table>
-        <thead><tr><th>Method</th><th>URL</th><th>Status</th><th>Type</th><th>Host</th><th>Size</th></tr></thead>
-        <tbody id="tbody"></tbody>
-      </table>
-    </div>
-    <div class="detail" id="detail">
-      <div class="empty">Select a request to view details</div>
-    </div>
-  </div>
-  <div class="status-bar">
-    <span id="status-left">Loading...</span>
-    <span id="status-right">capture.eemaill.codes</span>
-  </div>
-<script>
-let requests = new Map();
-let selectedId = null;
-let autoScroll = true;
-let sessionId = null;
-let searchText = '';
-let typeFilter = '';
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>HAR Capture Suite — Remote</title>
+    <script>
+      // Web shim: provide window.harSuite API that desktop-app renderer expects
+      // Talks to the capture server via HTTP REST + WebSocket
+      (function () {
+        const API = location.origin;
+        const WS_URL = API.replace(/^http/, 'ws') + '/ws';
+        let ws = null;
+        const listeners = {};
+        function on(event, cb) {
+          (listeners[event] = listeners[event] || []).push(cb);
+        }
+        function off(event, cb) {
+          const arr = listeners[event];
+          if (arr) listeners[event] = arr.filter((fn) => fn !== cb);
+        }
+        function emit(event, data) {
+          for (const fn of listeners[event] || []) fn(data);
+        }
+        function connectWs() {
+          ws = new WebSocket(WS_URL);
+          ws.onmessage = (e) => {
+            try {
+              const msg = JSON.parse(e.data);
+              emit(msg.type, msg);
+            } catch {}
+          };
+          ws.onclose = () => setTimeout(connectWs, 2000);
+          ws.onerror = () => { try { ws.close(); } catch {} };
+        }
+        connectWs();
 
-const API = location.origin;
-const WS_URL = API.replace(/^http/, 'ws') + '/ws';
+        async function api(path, opts) {
+          const r = await fetch(API + path, opts);
+          return r.json();
+        }
 
-// WS for live updates
-let ws;
-function connectWs() {
-  ws = new WebSocket(WS_URL);
-  ws.onmessage = (e) => {
-    try {
-      const msg = JSON.parse(e.data);
-      if (msg.type === 'request') { requests.set(msg.request.id, msg.request); renderRow(msg.request); updateCount(); if (autoScroll) scrollBottom(); }
-      else if (msg.type === 'update') { const r = requests.get(msg.id); if (r) { Object.assign(r, msg.patch); renderRow(r); if (selectedId === msg.id) renderDetail(r); } }
-      else if (msg.type === 'ws-message') { const r = requests.get(msg.id); if (r) { r.wsMessages = r.wsMessages || []; r.wsMessages.push(msg.message); if (selectedId === msg.id) renderDetail(r); } }
-      else if (msg.type === 'captcha') { /* TODO: captcha panel */ }
-      else if (msg.type === 'connection') { setConn(msg.connected); }
-      else if (msg.type === 'status') { setConn(msg.connected); }
-      else if (msg.type === 'init') { for (const r of msg.requests) requests.set(r.id, r); renderAll(); }
-      else if (msg.type === 'cleared') { requests.clear(); renderAll(); selectedId = null; document.getElementById('detail').innerHTML = '<div class="empty">Select a request to view details</div>'; }
-      else if (msg.type === 'reloaded') { requests.clear(); for (const r of msg.requests) requests.set(r.id, r); renderAll(); }
-    } catch {}
-  };
-  ws.onclose = () => setTimeout(connectWs, 2000);
-  ws.onerror = () => { try { ws.close(); } catch {} };
-}
-connectWs();
-
-function setConn(connected) {
-  document.getElementById('conn-dot').className = 'dot ' + (connected ? 'on' : 'off');
-  document.getElementById('conn-text').textContent = connected ? 'Extension connected' : 'No extension';
-}
-
-async function loadStatus() {
-  try {
-    const r = await fetch(API + '/api/status');
-    const d = await r.json();
-    setConn(d.connected);
-    document.getElementById('cap-dot').className = 'dot ' + (d.capturing ? 'on' : 'off');
-    document.getElementById('cap-text').textContent = d.capturing ? 'Capturing' : 'Paused';
-    sessionId = d.sessionId;
-    if (d.sessions) renderSessions(d.sessions, d.sessionId);
-    document.getElementById('req-count').textContent = d.requestCount + ' requests';
-  } catch {}
-}
-
-async function loadSessions() {
-  try {
-    const r = await fetch(API + '/api/sessions');
-    const d = await r.json();
-    if (d.sessions) renderSessions(d.sessions, d.currentId);
-  } catch {}
-}
-
-function renderSessions(sessions, currentId) {
-  const sel = document.getElementById('session-select');
-  sel.innerHTML = '';
-  for (const s of sessions) {
-    const opt = document.createElement('option');
-    opt.value = s.id;
-    opt.textContent = s.name + ' (' + (s.count || 0) + ')';
-    if (s.id === currentId) opt.selected = true;
-    sel.appendChild(opt);
-  }
-  sel.onchange = async () => {
-    const id = Number(sel.value);
-    const r = await fetch(API + '/api/sessions/' + id + '/open', { method: 'POST' });
-    const d = await r.json();
-    requests.clear();
-    if (d.requests) for (const req of d.requests) requests.set(req.id, req);
-    sessionId = id;
-    renderAll();
-  };
-}
-
-async function newSession() {
-  const name = prompt('Session name:', new Date().toISOString().slice(0, 19));
-  if (!name) return;
-  await fetch(API + '/api/sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
-  await loadSessions();
-}
-
-async function clearRequests() {
-  if (!confirm('Clear all requests in this session?')) return;
-  await fetch(API + '/api/requests', { method: 'DELETE' });
-  requests.clear(); renderAll(); selectedId = null;
-  document.getElementById('detail').innerHTML = '<div class="empty">Select a request to view details</div>';
-}
-
-function exportHAR() {
-  const data = { log: { version: '1.2', entries: Array.from(requests.values()).map(r => ({ request: { method: r.method, url: r.url, headers: r.requestHeaders || [] }, response: { status: r.status, headers: r.responseHeaders || [] }, startedDateTime: new Date(r.startedAt).toISOString(), time: r.durationMs || 0 })) } };
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'capture.har'; a.click();
-}
-
-function toggleScroll() { autoScroll = !autoScroll; document.getElementById('auto-scroll').textContent = 'Auto-scroll: ' + (autoScroll ? 'ON' : 'OFF'); }
-function scrollBottom() { const el = document.getElementById('list'); el.scrollTop = el.scrollHeight; }
-
-function statusClass(s) { if (!s) return ''; if (s < 200) return 'status1'; if (s < 300) return 'status2'; if (s < 400) return 'status3'; if (s < 500) return 'status4'; return 'status5'; }
-
-function renderRow(r) {
-  let tr = document.getElementById('row-' + r.id);
-  if (!tr) {
-    tr = document.createElement('tr');
-    tr.id = 'row-' + r.id;
-    tr.onclick = () => selectRequest(r.id);
-    document.getElementById('tbody').appendChild(tr);
-  }
-  if (searchText && !matchesFilter(r)) { tr.style.display = 'none'; return; }
-  if (typeFilter && r.type !== typeFilter) { tr.style.display = 'none'; return; }
-  tr.style.display = '';
-  tr.className = selectedId === r.id ? 'selected' : '';
-  const size = r.responseSize ? (r.responseSize > 1024 ? Math.round(r.responseSize / 1024) + 'KB' : r.responseSize + 'B') : '—';
-  tr.innerHTML = '<td class="method">' + esc(r.method) + '</td><td title="' + esc(r.url) + '">' + esc(truncUrl(r.url)) + '</td><td class="' + statusClass(r.status) + '">' + (r.status || '…') + '</td><td class="type">' + esc(r.type) + '</td><td class="host">' + esc(r.host) + '</td><td>' + size + '</td>';
-}
-
-function truncUrl(u) { try { const url = new URL(u); const p = url.pathname + url.search; return url.host + (p.length > 80 ? p.slice(0, 80) + '…' : p); } catch { return u.slice(0, 100); } }
-function esc(s) { if (!s) return ''; return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-function matchesFilter(r) { const s = searchText.toLowerCase(); return (r.url||'').toLowerCase().includes(s) || (r.host||'').toLowerCase().includes(s) || (r.method||'').toLowerCase().includes(s); }
-
-function selectRequest(id) { selectedId = id; const r = requests.get(id); if (r) renderDetail(r); document.querySelectorAll('tbody tr').forEach(tr => tr.classList.toggle('selected', tr.id === 'row-' + id)); }
-
-function renderDetail(r) {
-  const el = document.getElementById('detail');
-  const dur = r.durationMs ? r.durationMs + 'ms' : '…';
-  const size = r.responseSize ? (r.responseSize > 1024 ? Math.round(r.responseSize / 1024) + ' KB' : r.responseSize + ' B') : '…';
-  el.innerHTML = `
-    <div class="detail-header"><h2>${esc(r.method)} ${esc(r.url)}</h2><div class="meta"><span class="badge badge-blue">${esc(r.type)}</span><span>${r.status || '…'} ${esc(r.statusText||'')}</span><span>${dur}</span><span>${size}</span><span>${esc(r.host)}</span></div></div>
-    <div class="tabs">
-      <button class="active" onclick="showTab(this,'headers')">Headers</button>
-      <button onclick="showTab(this,'body')">Body</button>
-      <button onclick="showTab(this,'response')">Response</button>
-      ${r.wsMessages?.length ? '<button onclick="showTab(this,\'ws\')">WebSocket (' + r.wsMessages.length + ')</button>' : ''}
-    </div>
-    <div id="tab-headers" class="tab-content">${renderHeaders(r)}</div>
-    <div id="tab-body" class="tab-content" style="display:none">${r.requestBody ? '<pre>' + esc(r.requestBody) + '</pre>' : '<div class="empty">No request body</div>'}</div>
-    <div id="tab-response" class="tab-content" style="display:none">${renderResponseBody(r)}</div>
-    ${r.wsMessages?.length ? '<div id="tab-ws" class="tab-content" style="display:none">' + renderWs(r.wsMessages) + '</div>' : ''}
-  `;
-}
-
-function showTab(btn, id) { btn.parentElement.querySelectorAll('button').forEach(b => b.classList.remove('active')); btn.classList.add('active'); btn.closest('.detail').querySelectorAll('.tab-content').forEach(c => c.style.display = 'none'); document.getElementById('tab-' + id).style.display = ''; }
-
-function renderHeaders(r) {
-  let h = '<h3 style="margin:0 0 8px;font-size:12px;color:var(--text-dim)">Request Headers</h3><table class="kv">';
-  for (const hdr of (r.requestHeaders || [])) h += '<tr><td>' + esc(hdr.name) + '</td><td>' + esc(hdr.value) + '</td></tr>';
-  h += '</table><h3 style="margin:16px 0 8px;font-size:12px;color:var(--text-dim)">Response Headers</h3><table class="kv">';
-  for (const hdr of (r.responseHeaders || [])) h += '<tr><td>' + esc(hdr.name) + '</td><td>' + esc(hdr.value) + '</td></tr>';
-  return h + '</table>';
-}
-
-function renderResponseBody(r) {
-  if (!r.responseBody) return '<div class="empty">No response body</div>';
-  const mime = r.responseMimeType || '';
-  if (r.responseBodyBase64 || mime.includes('octet-stream')) return '<div class="empty">Binary data (' + (r.responseSize || 0) + ' bytes)</div>';
-  if (mime.includes('json') || r.responseBody.trimStart().startsWith('{') || r.responseBody.trimStart().startsWith('[')) {
-    try { return '<pre>' + esc(JSON.stringify(JSON.parse(r.responseBody), null, 2)) + '</pre>'; } catch {}
-  }
-  return '<pre>' + esc(r.responseBody) + '</pre>';
-}
-
-function renderWs(msgs) {
-  let h = '<table class="kv"><thead><tr><th>Dir</th><th>Time</th><th>Opcode</th><th>Payload</th></tr></thead><tbody>';
-  for (const m of msgs) {
-    const dir = m.direction === 'sent' ? '→ sent' : '← recv';
-    const time = new Date(m.timestamp).toLocaleTimeString();
-    const payload = m.isBinary ? '[binary ' + m.payloadLength + ' bytes]' : (m.payload || '').slice(0, 200);
-    h += '<tr><td>' + dir + '</td><td>' + time + '</td><td>' + m.opcode + '</td><td><pre style="margin:0;max-height:100px;overflow:auto">' + esc(payload) + '</pre></td></tr>';
-  }
-  return h + '</tbody></table>';
-}
-
-function renderAll() {
-  document.getElementById('tbody').innerHTML = '';
-  const sorted = Array.from(requests.values()).sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
-  for (const r of sorted) renderRow(r);
-  updateCount();
-}
-
-function updateCount() { document.getElementById('req-count').textContent = requests.size + ' requests'; }
-
-document.getElementById('search').oninput = (e) => { searchText = e.target.value; renderAll(); };
-document.getElementById('type-filter').onchange = (e) => { typeFilter = e.target.value; renderAll(); };
-
-loadStatus();
-setInterval(loadStatus, 10000);
-</script>
-</body>
+        window.harSuite = {
+          on,
+          off,
+          invoke: async (channel, ...args) => {
+            // Map Electron IPC channels to REST API
+            if (channel === 'capture:get-state') return api('/api/status');
+            if (channel === 'capture:set-enabled') return api('/api/capture', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: args[0] }) });
+            if (channel === 'capture:set-scope') return api('/api/capture', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scope: args[0] }) });
+            if (channel === 'capture:export-har') return api('/api/export/har');
+            if (channel === 'capture:export-ndjson') return api('/api/export/ndjson');
+            if (channel === 'capture:clear') return api('/api/requests', { method: 'DELETE' });
+            if (channel === 'capture:set-allowlist') return api('/api/allowlist', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ domains: args[0] }) });
+            if (channel === 'capture:set-sticky') return api('/api/capture/sticky', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tabId: args[0], sticky: args[1] }) });
+            if (channel === 'request:detail') return api('/api/requests/' + args[0]);
+            if (channel === 'request:body') return api('/api/requests/' + args[0] + '/body');
+            if (channel === 'request:response-body') return api('/api/requests/' + args[0] + '/response-body');
+            if (channel === 'request:ws-messages') return api('/api/requests/' + args[0] + '/ws-messages');
+            if (channel === 'request:delete') return api('/api/requests/' + args[0], { method: 'DELETE' });
+            if (channel === 'sessions:list') return api('/api/sessions');
+            if (channel === 'sessions:create') return api('/api/sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: args[0] }) });
+            if (channel === 'sessions:open') return api('/api/sessions/' + args[0] + '/open', { method: 'POST' });
+            if (channel === 'sessions:close') return api('/api/sessions/' + args[0] + '/close', { method: 'POST' });
+            if (channel === 'sessions:delete') return api('/api/sessions/' + args[0], { method: 'DELETE' });
+            if (channel === 'sessions:export') return api('/api/sessions/' + args[0] + '/export');
+            if (channel === 'bridge:status') return api('/api/status');
+            if (channel === 'bridge:reconnect') return api('/api/bridge/reconnect', { method: 'POST' });
+            if (channel === 'bridge:set-token') return api('/api/token', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: args[0] }) });
+            if (channel === 'redaction:get') return api('/api/redaction');
+            if (channel === 'redaction:set') return api('/api/redaction', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: args[0] }) });
+            if (channel === 'captchas:list') return api('/api/captchas');
+            if (channel === 'captchas:delete') return api('/api/captchas/' + args[0], { method: 'DELETE' });
+            if (channel === 'captchas:clear') return api('/api/captchas', { method: 'DELETE' });
+            console.warn('[shim] unhandled invoke:', channel, args);
+            return null;
+          },
+        };
+      })();
+    </script>
+    <script type="module" crossorigin src="/assets/index.web-CAtRgvFS.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-B5p_5POX.css">
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
 </html>

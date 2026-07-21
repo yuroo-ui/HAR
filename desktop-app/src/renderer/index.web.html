@@ -4,7 +4,80 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>HAR Capture Suite — Remote</title>
-    <script src="/shim.js"></script>
+    <script>
+      // Web shim: provide window.harSuite API that desktop-app renderer expects
+      // Talks to the capture server via HTTP REST + WebSocket
+      (function () {
+        const API = location.origin;
+        const WS_URL = API.replace(/^http/, 'ws') + '/ws';
+        let ws = null;
+        const listeners = {};
+        function on(event, cb) {
+          (listeners[event] = listeners[event] || []).push(cb);
+        }
+        function off(event, cb) {
+          const arr = listeners[event];
+          if (arr) listeners[event] = arr.filter((fn) => fn !== cb);
+        }
+        function emit(event, data) {
+          for (const fn of listeners[event] || []) fn(data);
+        }
+        function connectWs() {
+          ws = new WebSocket(WS_URL);
+          ws.onmessage = (e) => {
+            try {
+              const msg = JSON.parse(e.data);
+              emit(msg.type, msg);
+            } catch {}
+          };
+          ws.onclose = () => setTimeout(connectWs, 2000);
+          ws.onerror = () => { try { ws.close(); } catch {} };
+        }
+        connectWs();
+
+        async function api(path, opts) {
+          const r = await fetch(API + path, opts);
+          return r.json();
+        }
+
+        window.harSuite = {
+          on,
+          off,
+          invoke: async (channel, ...args) => {
+            // Map Electron IPC channels to REST API
+            if (channel === 'capture:get-state') return api('/api/status');
+            if (channel === 'capture:set-enabled') return api('/api/capture', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: args[0] }) });
+            if (channel === 'capture:set-scope') return api('/api/capture', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scope: args[0] }) });
+            if (channel === 'capture:export-har') return api('/api/export/har');
+            if (channel === 'capture:export-ndjson') return api('/api/export/ndjson');
+            if (channel === 'capture:clear') return api('/api/requests', { method: 'DELETE' });
+            if (channel === 'capture:set-allowlist') return api('/api/allowlist', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ domains: args[0] }) });
+            if (channel === 'capture:set-sticky') return api('/api/capture/sticky', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tabId: args[0], sticky: args[1] }) });
+            if (channel === 'request:detail') return api('/api/requests/' + args[0]);
+            if (channel === 'request:body') return api('/api/requests/' + args[0] + '/body');
+            if (channel === 'request:response-body') return api('/api/requests/' + args[0] + '/response-body');
+            if (channel === 'request:ws-messages') return api('/api/requests/' + args[0] + '/ws-messages');
+            if (channel === 'request:delete') return api('/api/requests/' + args[0], { method: 'DELETE' });
+            if (channel === 'sessions:list') return api('/api/sessions');
+            if (channel === 'sessions:create') return api('/api/sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: args[0] }) });
+            if (channel === 'sessions:open') return api('/api/sessions/' + args[0] + '/open', { method: 'POST' });
+            if (channel === 'sessions:close') return api('/api/sessions/' + args[0] + '/close', { method: 'POST' });
+            if (channel === 'sessions:delete') return api('/api/sessions/' + args[0], { method: 'DELETE' });
+            if (channel === 'sessions:export') return api('/api/sessions/' + args[0] + '/export');
+            if (channel === 'bridge:status') return api('/api/status');
+            if (channel === 'bridge:reconnect') return api('/api/bridge/reconnect', { method: 'POST' });
+            if (channel === 'bridge:set-token') return api('/api/token', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: args[0] }) });
+            if (channel === 'redaction:get') return api('/api/redaction');
+            if (channel === 'redaction:set') return api('/api/redaction', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: args[0] }) });
+            if (channel === 'captchas:list') return api('/api/captchas');
+            if (channel === 'captchas:delete') return api('/api/captchas/' + args[0], { method: 'DELETE' });
+            if (channel === 'captchas:clear') return api('/api/captchas', { method: 'DELETE' });
+            console.warn('[shim] unhandled invoke:', channel, args);
+            return null;
+          },
+        };
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
