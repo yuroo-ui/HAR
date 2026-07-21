@@ -13,11 +13,13 @@ export class Bridge {
   private authHandlers: AuthHandler[] = [];
   private connectTimer: number | null = null;
   private getToken: () => Promise<string>;
+  private getUrl: () => string;
   private authed = false;
   private authTimer: number | null = null;
 
-  constructor(getToken: () => Promise<string>) {
+  constructor(getToken: () => Promise<string>, getUrl?: () => string) {
     this.getToken = getToken;
+    this.getUrl = getUrl || (() => `ws://${BRIDGE_HOST}:${BRIDGE_PORT}`);
   }
 
   start() {
@@ -67,12 +69,12 @@ export class Bridge {
 
   private async connect() {
     if (this.ws) return;
-    const url = `ws://${BRIDGE_HOST}:${BRIDGE_PORT}`;
+    const url = this.getUrl();
     let socket: WebSocket;
     try {
       socket = new WebSocket(url);
     } catch (e) {
-      console.warn('[bridge] cannot open', e);
+      console.warn('[bridge] cannot open', url, e);
       this.scheduleReconnect();
       return;
     }
@@ -111,7 +113,7 @@ export class Bridge {
             clearTimeout(this.authTimer);
             this.authTimer = null;
           }
-          console.log('[bridge] authenticated');
+          console.log('[bridge] authenticated', url);
           const drain = this.queue.splice(0);
           for (const m of drain) this.send(m);
           for (const fn of this.authHandlers) {

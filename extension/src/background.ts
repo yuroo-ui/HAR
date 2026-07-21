@@ -15,6 +15,7 @@ import {
   setStickyTabs,
   setToken,
 } from './store.js';
+import { getRemoteBridgeUrl, getRemoteToken, getRemoteEnabled } from './remote-store.js';
 import { hostMatchesAllowlist, pushBounded, MAX_WS_MESSAGES } from '@har-suite/shared';
 import type {
   CaptureScope,
@@ -27,7 +28,59 @@ import { detectFromUrl, stableId } from './captcha-detector.js';
 
 const KEEP_ALIVE_ALARM = 'bridge-keepalive';
 
-const bridge = new Bridge(async () => await getToken());
+const localBridge = new Bridge(async () => await getToken());
+
+// Remote bridge uses dynamic URL so user can change endpoint without rebuild.
+// Defaults to wss://capture.eemaill.codes/bridge/ws (Cloudflare proxied to this server).
+let remoteUrlCache = '';
+
+const remoteBridge = new Bridge(
+  async () => await getRemoteToken(),
+  () => remoteUrlCache || 'wss://capture.eemaill.codes/bridge/ws',
+);
+
+// Keep remoteUrlCache updated async.
+getRemoteBridgeUrl().then((u) => { remoteUrlCache = u || 'wss://capture.eemaill.codes/bridge/ws'; });
+chrome.storage.onChanged?.addListener((changes, area) => {
+  if (area !== 'local') return;
+  const b = changes.remoteBridgeUrl?.newValue;
+  if (typeof b === 'string') remoteUrlCache = b || 'wss://capture.eemaill.codes/bridge/ws';
+  if (changes.remoteEnabled) {
+    const enabled = changes.remoteEnabled.newValue;
+    if (enabled) remoteBridge.start();
+  }
+});
+
+function combinedSend(msg: import('@har-suite/shared').BridgeMessage) {
+  localBridge.send(msg);
+  getRemoteEnabled()
+    .then((enabled) => { if (enabled) remoteBridge.send(msg); })
+    .catch(() => {});
+}
+
+const bridge = {
+  start() {
+    localBridge.start();
+    getRemoteEnabled()
+      .then((e) => { if (e) remoteBridge.start(); })
+      .catch(() => {});
+  },
+  onMessage(fn: Parameters<typeof localBridge.onMessage>[0]) {
+    localBridge.onMessage(fn);
+    remoteBridge.onMessage(fn);
+  },
+  onAuthenticated(fn: Parameters<typeof localBridge.onAuthenticated>[0]) {
+    localBridge.onAuthenticated(fn);
+    remoteBridge.onAuthenticated(fn);
+  },
+  send: combinedSend,
+  isOpen: () => localBridge.isOpen() || remoteBridge.isOpen(),
+  forceReconnect() {
+    localBridge.forceReconnect();
+    remoteBridge.forceReconnect();
+  },
+};
+
 
 const recentRequests = new Map<string, CapturedRequest>();
 const RECENT_LIMIT = 500;
@@ -407,6 +460,33 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       await setToken(String(msg.token ?? ''));
       bridge.forceReconnect();
       sendResponse({ ok: true });
+    } else if (msg?.kind === 'popup-set-remote-token') {
+      const { setRemoteToken } = await import('./remote-store.js');
+      await setRemoteToken(String(msg.token ?? ''));
+      (bridge as any).forceReconnect?.();
+      sendResponse({ ok: true });
+    } else if (msg?.kind === 'popup-set-remote-enabled') {
+      const { setRemoteEnabled } = await import('./remote-store.js');
+      await setRemoteEnabled(!!msg.enabled);
+      if (msg.enabled) {
+        // Re-start remote bridge and reconnect
+        (bridge as any).forceReconnect?.();
+      }
+      sendResponse({ ok: true });
+    } else if (msg?.kind === 'popup-set-remote-url') {
+      const { setRemoteBridgeUrl } = await import('./remote-store.js');
+      await setRemoteBridgeUrl(String(msg.url ?? ''));
+      remoteUrlCache = String(msg.url ?? '') || 'wss://capture.eemaill.codes/bridge/ws';
+      (bridge as any).forceReconnect?.();
+      sendResponse({ ok: true });
+    } else if (msg?.kind === 'popup-get-remote-state') {
+      const { getRemoteEnabled, getRemoteBridgeUrl, getRemoteToken } = await import('./remote-store.js');
+      sendResponse({
+        ok: true,
+        enabled: await getRemoteEnabled(),
+        url: await getRemoteBridgeUrl(),
+        token: await getRemoteToken(),
+      });
     } else if (msg?.kind === 'popup-clear-recent') {
       await clearRecentHosts();
       sendResponse({ ok: true });

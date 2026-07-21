@@ -358,6 +358,7 @@
     <div class="tabs">
       <button class="tab active" data-tab="main">Capture</button>
       <button class="tab" data-tab="recent">Recent</button>
+      <button class="tab" data-tab="remote">Remote</button>
       <button class="tab" data-tab="auth">Pairing</button>
     </div>
 
@@ -418,6 +419,28 @@
       <input type="text" id="token" placeholder="Paste token..." />
       <div class="row-end">
         <button class="btn" id="save-token">Pair</button>
+      </div>
+    </div>
+
+    <div id="tab-remote" class="panel" style="display: none">
+      <div class="field-label">Remote capture server</div>
+      <div class="hint" style="margin-bottom: 8px">
+        Stream all captured traffic to <b>capture.eemaill.codes</b> (this VPS). Enable to send traffic to server
+        for centralized viewing. Set token to secure the bridge.
+      </div>
+      <label style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+        <input type="checkbox" id="remote-enabled" /> <span>Enable remote streaming</span>
+      </label>
+      <div class="field-label">Remote WSS URL</div>
+      <input type="text" id="remote-url" placeholder="wss://capture.eemaill.codes/bridge/ws" />
+      <div class="field-label" style="margin-top:10px;">Remote bridge token</div>
+      <input type="text" id="remote-token" placeholder="Leave empty if server has no token" />
+      <div class="row-end">
+        <button class="btn" id="save-remote">Save remote</button>
+      </div>
+      <div class="hint" id="remote-status" style="margin-top:8px"></div>
+      <div style="margin-top:14px;padding:10px;background:var(--bg-input);border:1px solid var(--border);border-radius:7px;">
+        <div style="font-size:11px;color:var(--text-dim);">After enabling, open <a href="https://capture.eemaill.codes" target="_blank" style="color:var(--accent)">capture.eemaill.codes</a> to view.</div>
       </div>
     </div>
 

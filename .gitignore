@@ -13,4 +13,4 @@ captures/
 .editorconfig
 tests/
 release/
-package-lock.json
+package-lock.jsonserver/data/

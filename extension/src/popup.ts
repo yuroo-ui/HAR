@@ -1,7 +1,6 @@
 import type { CaptureScope } from '@har-suite/shared';
 
 type RecentHost = { host: string; count: number; last: number };
-
 type State = {
   capturing: boolean;
   allowlist: string[];
@@ -15,9 +14,6 @@ type State = {
 
 const $ = (id: string) => document.getElementById(id) as HTMLElement;
 
-// Resolve the active tab from the popup context (where currentWindow is the
-// browser window the popup belongs to). The service worker can't reliably
-// resolve "the active tab" itself, so we pass the id explicitly.
 async function getActiveTabId(): Promise<number | undefined> {
   try {
     const [t] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -30,6 +26,14 @@ async function getActiveTabId(): Promise<number | undefined> {
 async function getState(): Promise<State> {
   const tabId = await getActiveTabId();
   return await chrome.runtime.sendMessage({ kind: 'popup-get-state', tabId });
+}
+
+async function getRemoteState(): Promise<{ ok: boolean; enabled: boolean; url: string; token: string }> {
+  try {
+    return await chrome.runtime.sendMessage({ kind: 'popup-get-remote-state' });
+  } catch {
+    return { ok: false, enabled: false, url: '', token: '' };
+  }
 }
 
 const SCOPE_HINTS: Record<CaptureScope, string> = {
@@ -101,7 +105,6 @@ async function render(state: State) {
 
   renderScope(state.scope);
 
-  // Form fields: only overwrite when the user is NOT actively editing them.
   const allowlistEl = $('allowlist') as HTMLTextAreaElement;
   if (document.activeElement !== allowlistEl) {
     const fromState = state.allowlist.join('\n');
@@ -113,7 +116,6 @@ async function render(state: State) {
     if (tokenEl.value !== fromState) tokenEl.value = fromState;
   }
 
-  // Connection pill (header) + footer status.
   $('conn').innerHTML = `<span class="dot ${state.connected ? 'on' : 'off'}"></span>${
     state.connected ? 'Paired' : state.token ? 'Reconnecting…' : 'Not paired'
   }`;
@@ -123,7 +125,6 @@ async function render(state: State) {
       : 'Capture disabled'
   }`;
 
-  // "Capture this tab" button reflects the active tab's sticky state.
   const host = await activeTabHost();
   $('active-tab-host').textContent = host ? `Active tab: ${host}` : '';
   const btn = $('capture-tab') as HTMLButtonElement;
@@ -142,13 +143,35 @@ function activateTab(name: string) {
   for (const t of document.querySelectorAll('.tab')) {
     t.classList.toggle('active', (t as HTMLElement).dataset.tab === name);
   }
-  for (const id of ['main', 'recent', 'auth']) {
-    ($(`tab-${id}`) as HTMLElement).style.display = id === name ? '' : 'none';
+  for (const id of ['main', 'recent', 'remote', 'auth']) {
+    const el = $(`tab-${id}`);
+    if (el) el.style.display = id === name ? '' : 'none';
+  }
+}
+
+async function refreshRemote() {
+  const rs = await getRemoteState();
+  const enabledEl = $('remote-enabled') as HTMLInputElement | null;
+  const urlEl = $('remote-url') as HTMLInputElement | null;
+  const tokenEl = $('remote-token') as HTMLInputElement | null;
+  const statusEl = $('remote-status') as HTMLElement | null;
+  if (!enabledEl) return;
+  if (document.activeElement !== enabledEl) enabledEl.checked = !!rs.enabled;
+  if (urlEl && document.activeElement !== urlEl) {
+    const desired = rs.url || 'wss://capture.eemaill.codes/bridge/ws';
+    if (urlEl.value !== desired) urlEl.value = desired;
+  }
+  if (tokenEl && document.activeElement !== tokenEl) {
+    if (tokenEl.value !== (rs.token || '')) tokenEl.value = rs.token || '';
+  }
+  if (statusEl) {
+    statusEl.textContent = rs.enabled ? 'Remote ON — streaming to server.' : 'Remote OFF.';
   }
 }
 
 async function init() {
   render(await getState());
+  refreshRemote();
 
   document.querySelectorAll('.tab').forEach((t) => {
     t.addEventListener('click', () => activateTab((t as HTMLElement).dataset.tab!));
@@ -203,18 +226,41 @@ async function init() {
     render(await getState());
   });
 
-  // Render recent list on its own (separate from form fields, so it always refreshes).
+  // Remote tab handlers
+  const remoteEnabledEl = $('remote-enabled') as HTMLInputElement | null;
+  if (remoteEnabledEl) {
+    remoteEnabledEl.addEventListener('change', async (e) => {
+      const enabled = (e.target as HTMLInputElement).checked;
+      await chrome.runtime.sendMessage({ kind: 'popup-set-remote-enabled', enabled });
+      refreshRemote();
+    });
+  }
+  const saveRemoteBtn = $('save-remote');
+  if (saveRemoteBtn) {
+    saveRemoteBtn.addEventListener('click', async () => {
+      const url = ($('remote-url') as HTMLInputElement).value.trim();
+      const token = ($('remote-token') as HTMLInputElement).value.trim();
+      const enabled = ($('remote-enabled') as HTMLInputElement).checked;
+      if (url) await chrome.runtime.sendMessage({ kind: 'popup-set-remote-url', url });
+      await chrome.runtime.sendMessage({ kind: 'popup-set-remote-token', token });
+      await chrome.runtime.sendMessage({ kind: 'popup-set-remote-enabled', enabled });
+      const sEl = $('remote-status');
+      if (sEl) sEl.textContent = 'Saved. Reconnecting…';
+      setTimeout(() => refreshRemote(), 800);
+    });
+  }
+
   const refreshRecent = async () => {
     const s = await getState();
     renderRecent(s.recentHosts, s.allowlist);
   };
   refreshRecent();
 
-  // Auto-refresh while popup open.
   setInterval(async () => {
     const s = await getState();
     render(s);
     renderRecent(s.recentHosts, s.allowlist);
+    refreshRemote();
   }, 2000);
 }
 
