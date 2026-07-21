@@ -400,11 +400,14 @@ server.on('upgrade', (req, socket, head) => {
   }
 });
 
-wssBridge.on('connection', (ws) => {
+wssBridge.on('connection', (ws, req) => {
+  const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+  console.log('[bridge] new connection from', clientIp);
   let authed = false;
-  const AUTH_GRACE = 5000;
+  const AUTH_GRACE = 8000;
   const kill = setTimeout(() => {
     if (!authed) {
+      console.log('[bridge] auth timeout from', clientIp);
       try { ws.close(1008, 'auth timeout'); } catch {}
     }
   }, AUTH_GRACE);
@@ -415,6 +418,7 @@ wssBridge.on('connection', (ws) => {
       if (!authed) ws.send(JSON.stringify({ kind: 'auth-fail', reason: 'malformed handshake' }));
       return;
     }
+    console.log('[bridge] message:', msg.kind, 'from:', clientIp);
 
     if (!authed) {
       if (msg?.kind !== 'auth') {
