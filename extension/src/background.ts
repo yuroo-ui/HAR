@@ -30,7 +30,7 @@ const KEEP_ALIVE_ALARM = 'bridge-keepalive';
 
 const localBridge = new Bridge(async () => await getToken());
 
-// Remote bridge uses dynamic URL so user can change endpoint without rebuild.
+// Remote bridge uses dynamic URL so user can change endpoint without build.
 // Defaults to wss://capture.eemaill.codes/bridge/ws (Cloudflare proxied to this server).
 let remoteUrlCache = '';
 
@@ -49,7 +49,16 @@ chrome.storage.onChanged?.addListener((changes, area) => {
     const enabled = changes.remoteEnabled.newValue;
     if (enabled) remoteBridge.start();
   }
+  // Also restart on token change
+  if (changes.remoteBridgeToken) {
+    remoteBridge.forceReconnect();
+  }
 });
+
+// Auto-start remote bridge on install (default enabled)
+getRemoteEnabled().then((enabled) => {
+  if (enabled !== false) remoteBridge.start(); // start unless explicitly disabled
+}).catch(() => { remoteBridge.start(); }); // default: start
 
 function combinedSend(msg: import('@har-suite/shared').BridgeMessage) {
   localBridge.send(msg);
