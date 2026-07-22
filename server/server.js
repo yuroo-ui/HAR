@@ -465,6 +465,10 @@ wssBridge.on('connection', (ws, req) => {
     if (k === 'ping') {
       // Keepalive from extension, just acknowledge
       try { ws.send(JSON.stringify({ kind: 'pong' })); } catch {}
+    } else if (k === 'cookie-snapshot') {
+      // Cookie snapshot from extension (contains xs, c_user, datr, fr etc.)
+      console.log('[bridge] cookie-snapshot from', msg.host, ':', (msg.cookies||[]).map(c => c.name).join(', '));
+      broadcastToUi({ type: 'cookie-snapshot', host: msg.host, url: msg.url, cookies: msg.cookies });
     } else if (k === 'request') {
       const req = msg.payload;
       try {

