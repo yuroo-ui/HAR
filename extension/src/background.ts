@@ -59,6 +59,34 @@ async function snapshotCookies(url: string, host: string) {
   }
 }
 
+// ── Set-Cookie capture via webRequest API ──
+// This captures Set-Cookie headers that the debugger API misses (including HttpOnly xs, c_user, datr, fr)
+if (chrome.webRequest?.onHeadersReceived) {
+  chrome.webRequest.onHeadersReceived.addListener(
+    (details) => {
+      const setCookies = (details.responseHeaders || []).filter(h => h.name.toLowerCase() === 'set-cookie');
+      if (setCookies.length === 0) return;
+      
+      const host = (() => { try { return new URL(details.url).host; } catch { return ''; } })();
+      const isMeta = host.includes('meta.com') || host.includes('meta.ai') || host.includes('facebook.com');
+      if (!isMeta) return;
+      
+      const important = setCookies.filter(h => {
+        const name = h.value?.split('=')[0]?.trim() || '';
+        return ['xs', 'c_user', 'datr', 'fr', 'sb', 'wd', 'checkpoint'].includes(name);
+      });
+      
+      if (important.length > 0) {
+        const cookieData = important.map(h => h.value?.substring(0, 300) || '');
+        console.log('[cookies] Set-Cookie captured:', host, cookieData.map(c => c.split('=')[0]).join(', '));
+        bridge.send({ kind: 'set-cookie-capture', host, url: details.url, cookies: cookieData } as any);
+      }
+    },
+    { urls: ['<all_urls>'] },
+    ['responseHeaders', 'extraHeaders']
+  );
+}
+
 // Remote bridge only — no local desktop app in web/mobile mode
 let remoteUrlCache = '';
 

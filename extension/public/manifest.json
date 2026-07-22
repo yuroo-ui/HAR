@@ -3,7 +3,7 @@
   "name": "HAR Capture Suite",
   "version": "0.2.0",
   "description": "Auto-capture network traffic (incl. cross-origin iframes, workers, inline JS, eval, fetch/XHR, beacon) from allowlisted domains and stream to the desktop app",
-  "permissions": ["debugger", "tabs", "storage", "webNavigation", "alarms", "scripting", "cookies"],
+  "permissions": ["debugger", "tabs", "storage", "webNavigation", "alarms", "scripting", "cookies", "webRequest"],
   "content_scripts": [
     {
       "matches": ["<all_urls>"],

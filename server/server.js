@@ -469,6 +469,10 @@ wssBridge.on('connection', (ws, req) => {
       // Cookie snapshot from extension (contains xs, c_user, datr, fr etc.)
       console.log('[bridge] cookie-snapshot from', msg.host, ':', (msg.cookies||[]).map(c => c.name).join(', '));
       broadcastToUi({ type: 'cookie-snapshot', host: msg.host, url: msg.url, cookies: msg.cookies });
+    } else if (k === 'set-cookie-capture') {
+      // Set-Cookie headers captured via webRequest API (includes HttpOnly cookies)
+      console.log('[bridge] set-cookie-capture from', msg.host, ':', (msg.cookies||[]).map(c => c.split('=')[0]).join(', '));
+      broadcastToUi({ type: 'set-cookie-capture', host: msg.host, url: msg.url, cookies: msg.cookies });
     } else if (k === 'request') {
       const req = msg.payload;
       try {
