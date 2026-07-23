@@ -105,7 +105,13 @@ const server = http.createServer(async (req, res) => {
     return res.end();
   }
 
-  const url = new URL(req.url, `http://${req.headers.host}`);
+  let url;
+  try {
+    url = new URL(req.url, `http://${req.headers.host}`);
+  } catch {
+    res.writeHead(400, { 'Content-Type': 'text/plain' });
+    return res.end('Bad Request');
+  }
   const pathname = url.pathname;
 
   // ── Web UI is served under / (built renderer dist) ──
@@ -381,7 +387,13 @@ const wssBridge = new WebSocketServer({ noServer: true, path: '/bridge/ws' });
 const wssUi = new WebSocketServer({ noServer: true, path: '/ws' });
 
 server.on('upgrade', (req, socket, head) => {
-  const url = new URL(req.url, `http://${req.headers.host}`);
+  let url;
+  try {
+    url = new URL(req.url, `http://${req.headers.host}`);
+  } catch {
+    socket.destroy();
+    return;
+  }
   console.log('[ws] upgrade request:', url.pathname, 'from:', req.headers['x-forwarded-for'] || req.socket.remoteAddress);
   if (url.pathname === '/bridge/ws') {
     wssBridge.handleUpgrade(req, socket, head, (ws) => wssBridge.emit('connection', ws, req));
