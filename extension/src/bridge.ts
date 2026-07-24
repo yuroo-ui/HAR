@@ -6,6 +6,11 @@ type AuthHandler = () => void;
 const RECONNECT_MS = 2000;
 const AUTH_TIMEOUT_MS = 5000;
 
+/**
+ * Bridge transport used by the extension.
+ * - Default: local desktop app ws://127.0.0.1:9876 (waguri original)
+ * - Optional: remote wss://capture... with HTTP polling fallback (custom useful)
+ */
 export class Bridge {
   private ws: WebSocket | null = null;
   private queue: BridgeMessage[] = [];
@@ -18,10 +23,13 @@ export class Bridge {
   private authTimer: number | null = null;
   private keepAliveTimer: number | null = null;
   private usePolling = false;
+  private allowPolling: boolean;
 
-  constructor(getToken: () => Promise<string>, getUrl?: () => string) {
+  constructor(getToken: () => Promise<string>, getUrl?: () => string, opts?: { allowPolling?: boolean }) {
     this.getToken = getToken;
     this.getUrl = getUrl || (() => `ws://${BRIDGE_HOST}:${BRIDGE_PORT}`);
+    // Polling only makes sense for remote https endpoints, not local desktop.
+    this.allowPolling = opts?.allowPolling ?? false;
   }
 
   start() {
@@ -38,7 +46,6 @@ export class Bridge {
 
   send(msg: BridgeMessage) {
     if (this.usePolling) {
-      // HTTP polling mode: send via POST
       this.sendViaHttp(msg);
       return;
     }
@@ -85,24 +92,28 @@ export class Bridge {
       socket = new WebSocket(url);
     } catch (e) {
       console.warn('[bridge] cannot open', url, e);
-      this.fallbackToPolling();
+      if (this.allowPolling) this.fallbackToPolling();
+      else this.scheduleReconnect();
       return;
     }
     this.ws = socket;
 
-    // If WebSocket doesn't open within 5s, fallback to polling
-    const openTimeout = self.setTimeout(() => {
-      if (this.ws === socket && !this.authed) {
-        console.warn('[bridge] ws open timeout, falling back to HTTP polling');
-        try { socket.close(); } catch {}
-        this.ws = null;
-        this.fallbackToPolling();
-      }
-    }, 5000);
+    const openTimeout = this.allowPolling
+      ? self.setTimeout(() => {
+          if (this.ws === socket && !this.authed) {
+            console.warn('[bridge] ws open timeout, falling back to HTTP polling');
+            try {
+              socket.close();
+            } catch {}
+            this.ws = null;
+            this.fallbackToPolling();
+          }
+        }, 5000)
+      : null;
 
     socket.addEventListener('open', async () => {
       if (this.ws !== socket) return;
-      clearTimeout(openTimeout);
+      if (openTimeout != null) clearTimeout(openTimeout);
       const token = await this.getToken();
       const auth: BridgeMessage = {
         kind: 'auth',
@@ -179,9 +190,8 @@ export class Bridge {
     });
   }
 
-  // HTTP polling fallback for environments where WebSocket doesn't work (e.g. Chrome Android extensions)
   private async fallbackToPolling() {
-    if (this.usePolling) return;
+    if (!this.allowPolling || this.usePolling) return;
     this.usePolling = true;
     const url = this.getUrl();
     const serverUrl = url.replace(/^wss?:\/\//, 'https://').replace(/\/bridge\/ws$/, '');
@@ -189,7 +199,6 @@ export class Bridge {
 
     console.log('[bridge] using HTTP polling to', serverUrl);
 
-    // Verify connection
     try {
       const resp = await fetch(`${serverUrl}/api/bridge/poll?token=${encodeURIComponent(token)}`);
       if (!resp.ok) {
@@ -208,10 +217,11 @@ export class Bridge {
     this.authed = true;
     console.log('[bridge] HTTP polling authenticated');
     for (const fn of this.authHandlers) {
-      try { fn(); } catch {}
+      try {
+        fn();
+      } catch {}
     }
 
-    // Drain queue
     const drain = this.queue.splice(0);
     for (const m of drain) this.sendViaHttp(m);
   }
@@ -248,9 +258,11 @@ export class Bridge {
     this.stopKeepAlive();
     this.keepAliveTimer = self.setInterval(() => {
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        try { this.ws.send(JSON.stringify({ kind: 'ping' })); } catch {}
+        try {
+          this.ws.send(JSON.stringify({ kind: 'ping' }));
+        } catch {}
       }
-    }, 25000);
+    }, 25000) as unknown as number;
   }
 
   private stopKeepAlive() {

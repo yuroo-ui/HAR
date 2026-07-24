@@ -36,7 +36,7 @@ async function copyAssets() {
   console.log('[build] copied public/ → dist/');
 }
 
-const entries = ['src/background.ts', 'src/popup.ts', 'src/content-captcha.ts'];
+const entries = ['src/background.ts', 'src/popup.ts', 'src/content-captcha.ts', 'src/content-js-capture.ts'];
 const baseOptions = {
   entryPoints: entries.map((e) => join(root, e)),
   bundle: true,

