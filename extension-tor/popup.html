@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { font: 13px sans-serif; width: 280px; padding: 10px; box-sizing: border-box; }
+  h3 { margin: 0 0 8px; font-size: 14px; }
+  label { display: block; margin: 6px 0 2px; color: #555; }
+  input[type=text] { width: 100%; box-sizing: border-box; padding: 5px; }
+  .row { display: flex; align-items: center; gap: 6px; margin: 8px 0; }
+  button { padding: 6px 10px; cursor: pointer; }
+  .status { margin-top: 8px; padding: 6px; background: #f0f0f0; border-radius: 4px; font-size: 12px; }
+  .on { color: #1a7f37; } .off { color: #b91c1c; }
+  select { padding: 4px; }
+</style>
+</head>
+<body>
+  <h3>HAR Capture (Tor)</h3>
+  <div class="row">
+    <input type="checkbox" id="enabled" checked>
+    <label for="enabled" style="margin:0">Capture enabled</label>
+  </div>
+  <label>Token (dari capture.eemaill.codes)</label>
+  <input type="text" id="token" placeholder="534EGZALNATD">
+  <label>Allowlist (pisahkan dengan koma)</label>
+  <input type="text" id="allowlist" placeholder="meta.com, meta.ai, facebook.com">
+  <div class="row">
+    <label for="scope" style="margin:0">Scope:</label>
+    <select id="scope">
+      <option value="data">Meta only</option>
+      <option value="all">All traffic</option>
+    </select>
+  </div>
+  <div class="row">
+    <input type="checkbox" id="useWs">
+    <label for="useWs" style="margin:0">Use WebSocket (cobalah jika polling gagal)</label>
+  </div>
+  <div class="row">
+    <button id="save">Save</button>
+    <button id="cleartoken">Clear Token</button>
+  </div>
+  <div class="status" id="status">Loading…</div>
+  <script src="popup.js"></script>
+</body>
+</html>

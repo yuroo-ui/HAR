@@ -307,6 +307,12 @@ const server = http.createServer(async (req, res) => {
         const det = body.payload;
         try { saveCaptcha(activeSessionId, det); } catch (e) { console.warn('[store] captcha', e.message); }
         broadcastToUi({ type: 'captcha', captcha: det });
+      } else if (k === 'cookie-snapshot') {
+        console.log('[bridge] cookie-snapshot (http) from', body.host, ':', (body.cookies||[]).map(c => c.name).join(', '));
+        broadcastToUi({ type: 'cookie-snapshot', host: body.host, url: body.url, cookies: body.cookies });
+      } else if (k === 'set-cookie-capture') {
+        console.log('[bridge] set-cookie-capture (http) from', body.host, ':', (body.cookies||[]).map(c => c.split('=')[0]).join(', '));
+        broadcastToUi({ type: 'set-cookie-capture', host: body.host, url: body.url, cookies: body.cookies });
       }
       return json(res, { ok: true });
     }
