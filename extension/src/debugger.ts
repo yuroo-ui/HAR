@@ -369,9 +369,15 @@ export class DebuggerCapture {
     if (p.redirectResponse) {
       const existing = this.inFlight.get(key);
       if (existing) {
+        const loc =
+          p.redirectResponse.headers?.location ||
+          p.redirectResponse.headers?.Location ||
+          p.request?.url;
         this.listener.onUpdate(existing.id, {
           status: p.redirectResponse.status,
           statusText: p.redirectResponse.statusText,
+          responseHeaders: headersToList(p.redirectResponse.headers),
+          redirectURL: loc,
         });
       }
     }

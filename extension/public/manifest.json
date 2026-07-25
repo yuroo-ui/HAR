@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "HAR Capture Suite",
-  "version": "0.4.0",
-  "description": "HAR Capture Suite v0.4 \u2014 dual bridge, cookie capture, JS capture, mobile webRequest fallback",
+  "version": "0.4.1",
+  "description": "HAR Capture Suite v0.4.1 \u2014 near-desktop parity: body/WS hooks, HAR 1.2 export, mobile fallback",
   "permissions": [
     "debugger",
     "tabs",

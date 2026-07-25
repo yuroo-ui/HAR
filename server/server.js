@@ -19,6 +19,7 @@ import {
   clearCookies, exportCookieJar, publishStatus,
 } from './store.js';
 import { awsEnabled } from './aws-store.js';
+import { buildHar } from './har-export.js';
 import { redisEnabled, redisPing, redisMarkExtConnected } from './redis-store.js';
 
 const BRIDGE_VERSION = 2;
@@ -447,7 +448,7 @@ const server = http.createServer(async (req, res) => {
       } else if (k === 'cookie-snapshot') {
         const host = body.host || '';
         const url = body.url || '';
-        const rows = (body.cookies || []).map((c) => ({ host, url, name: c.name, value: c.value, domain: c.domain, httpOnly: !!c.httpOnly, secure: !!c.secure, path: c.path, source: 'cookie-snapshot', ts: Date.now() }));
+        const rows = (body.cookies || []).map((c) => ({ host, url, name: c.name, value: c.value, domain: c.domain, httpOnly: !!c.httpOnly, secure: !!c.secure, path: c.path, sameSite: c.sameSite || null, partitionKey: c.partitionKey ? JSON.stringify(c.partitionKey) : null, expirationDate: c.expirationDate || null, source: 'cookie-snapshot', ts: Date.now() }));
         console.log('[bridge] cookie-snapshot (http) from', host, ':', rows.map((c) => c.name).join(', '));
         await persistCookieRows(activeSessionId, rows);
         broadcastToUi({ type: 'cookie-snapshot', host, url, cookies: body.cookies, sessionId: activeSessionId });
@@ -458,7 +459,7 @@ const server = http.createServer(async (req, res) => {
           const s = String(raw || '');
           const name = s.split('=')[0]?.trim() || '';
           const value = s.slice(name.length + 1).split(';')[0] || '';
-          return { host, url, name, value, domain: host, httpOnly: /httponly/i.test(s), secure: /secure/i.test(s), path: (s.match(/path=([^;]+)/i) || [])[1] || null, source: 'set-cookie', raw: s, ts: Date.now() };
+          return { host, url, name, value, domain: host, httpOnly: /httponly/i.test(s), secure: /secure/i.test(s), path: (s.match(/path=([^;]+)/i) || [])[1] || null, sameSite: ((s.match(/samesite=([^;]+)/i) || [])[1] || '').trim() || null, partitionKey: /partitioned/i.test(s) ? 'Partitioned' : null, source: 'set-cookie', raw: s, ts: Date.now() };
         });
         console.log('[bridge] set-cookie-capture (http) from', host, ':', rows.map((c) => c.name).join(', '));
         await persistCookieRows(activeSessionId, rows);
@@ -507,12 +508,22 @@ const server = http.createServer(async (req, res) => {
       await clearCookies(sid);
       return json(res, { ok: true });
     }
-    // GET /api/export/:format
-    if (pathname.startsWith('/api/export/') && req.method === 'GET') {
-      const fmt = pathname.split('/')[3] || 'har';
+    // GET /api/export/:format  (har | json | zip-meta)
+    if ((pathname.startsWith('/api/export/') || pathname === '/api/export') && req.method === 'GET') {
+      const fmt = (pathname.startsWith('/api/export/') ? pathname.split('/')[3] : url.searchParams.get('format')) || 'har';
       const sid = Number(url.searchParams.get('sessionId') || activeSessionId);
       const reqs = await loadRequests(sid, { limit: 5000 });
-      return json(res, { requests: reqs, format: fmt });
+      if (fmt === 'json') return json(res, { sessionId: sid, count: reqs.length, requests: reqs });
+      const har = buildHar(reqs, { creatorVersion: '0.4.1' });
+      if (fmt === 'har' || fmt === 'har.json') {
+        res.writeHead(200, {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Content-Disposition': `attachment; filename="session-${sid}.har"`,
+          'Access-Control-Allow-Origin': '*',
+        });
+        return res.end(JSON.stringify(har, null, 2));
+      }
+      return json(res, { sessionId: sid, format: fmt, har, count: reqs.length });
     }
     // GET /api/requests/:id/to-curl
     if (pathname.match(/^\/api\/requests\/[^/]+\/to-curl$/) && req.method === 'GET') {
@@ -686,6 +697,9 @@ wssBridge.on('connection', (ws, req) => {
         httpOnly: !!c.httpOnly,
         secure: !!c.secure,
         path: c.path,
+        sameSite: c.sameSite || null,
+        partitionKey: c.partitionKey ? JSON.stringify(c.partitionKey) : null,
+        expirationDate: c.expirationDate || null,
         source: 'cookie-snapshot',
         ts: Date.now(),
       }));

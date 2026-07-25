@@ -19,20 +19,30 @@ type JsCaptureEvent = {
     | 'fetch-response'
     | 'xhr-open'
     | 'xhr-send'
+    | 'xhr-load'
     | 'beacon'
     | 'sw-register'
     | 'import-url'
-    | 'worker-created';
+    | 'worker-created'
+    | 'ws-open'
+    | 'ws-send'
+    | 'ws-message'
+    | 'ws-close';
   url?: string;
-  code?: string; // truncated to 4KB
+  code?: string;
   method?: string;
   headers?: Record<string, string>;
-  body?: string; // truncated to 4KB
+  body?: string;
+  status?: number;
+  mimeType?: string;
+  direction?: 'sent' | 'received';
+  captureId?: string;
   timestamp: number;
   pageUrl: string;
 };
 
-const MAX_CODE_LENGTH = 4096;
+const MAX_CODE_LENGTH = 200_000;
+const MAX_WS_PAYLOAD = 64_000;
 const _W = window as unknown as { __harSuiteJsCapture?: boolean };
 
 if (_W.__harSuiteJsCapture) {
@@ -160,12 +170,35 @@ if (_W.__harSuiteJsCapture) {
   Object.defineProperty(CapturedFunction, 'toString', { value: () => 'function Function() { [native code] }' });
   (window as any).Function = CapturedFunction;
 
-  // ─── 4. Intercept fetch() ───
+  // ─── 4. Intercept fetch() (request + response body for mobile parity) ───
+  function bodyToString(body: any): string | undefined {
+    if (body == null) return undefined;
+    if (typeof body === 'string') return body;
+    if (body instanceof URLSearchParams) return body.toString();
+    if (body instanceof ArrayBuffer) return `[ArrayBuffer ${body.byteLength} bytes]`;
+    if (typeof ArrayBuffer !== 'undefined' && ArrayBuffer.isView?.(body)) return `[TypedArray ${body.byteLength} bytes]`;
+    if (typeof Blob !== 'undefined' && body instanceof Blob) return `[Blob ${body.size} bytes type=${body.type || ''}]`;
+    if (typeof FormData !== 'undefined' && body instanceof FormData) {
+      try {
+        const obj: Record<string, string> = {};
+        body.forEach((v, k) => {
+          obj[k] = typeof v === 'string' ? v : `[File ${v.name || 'blob'} ${v.size || 0}]`;
+        });
+        return JSON.stringify(obj);
+      } catch {
+        return '[FormData]';
+      }
+    }
+    try { return String(body); } catch { return undefined; }
+  }
+
   const origFetch = window.fetch;
   window.fetch = async function (input: RequestInfo | URL, init?: RequestInit) {
     let url: string;
     let method = init?.method ?? 'GET';
     let reqBody: string | undefined;
+    let headers: Record<string, string> | undefined;
+    const captureId = `jsfetch:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
 
     if (typeof input === 'string') {
       url = input;
@@ -174,56 +207,74 @@ if (_W.__harSuiteJsCapture) {
     } else if (input instanceof Request) {
       url = input.url;
       method = init?.method ?? input.method;
+      try {
+        if (!init?.body && input.clone) {
+          const ct = input.headers?.get?.('content-type') || '';
+          if (ct.includes('json') || ct.includes('text') || ct.includes('x-www-form-urlencoded')) {
+            reqBody = await input.clone().text();
+          }
+        }
+      } catch {}
     } else {
       url = String(input);
     }
 
-    if (init?.body) {
-      if (typeof init.body === 'string') {
-        reqBody = init.body;
-      } else if (init.body instanceof ArrayBuffer) {
-        reqBody = `[ArrayBuffer ${init.body.byteLength} bytes]`;
-      } else if (init.body instanceof FormData) {
-        reqBody = '[FormData]';
-      } else if (init.body instanceof URLSearchParams) {
-        reqBody = init.body.toString();
+    if (init?.body != null) reqBody = bodyToString(init.body);
+    try {
+      if (init?.headers) {
+        headers = {};
+        if (init.headers instanceof Headers) init.headers.forEach((v, k) => { headers![k] = v; });
+        else if (Array.isArray(init.headers)) for (const [k, v] of init.headers) headers[k] = String(v);
+        else headers = { ...(init.headers as any) };
       }
-    }
+    } catch {}
 
     send({
       kind: 'js-capture',
       subtype: 'fetch-request',
       url,
       method,
+      headers,
       body: truncate(reqBody),
+      captureId,
       timestamp: Date.now(),
       pageUrl,
     });
 
     const response = await origFetch.call(this, input, init);
 
-    // Clone to read body without consuming the original
     try {
       const clone = response.clone();
       const contentType = clone.headers.get('content-type') ?? '';
-      // Only capture text-like responses
+      const respHeaders: Record<string, string> = {};
+      clone.headers.forEach((v, k) => { respHeaders[k] = v; });
+      let text: string | undefined;
+      // Prefer text-like; still attempt text for unknown small responses
       if (
         contentType.includes('json') ||
         contentType.includes('text') ||
         contentType.includes('javascript') ||
-        contentType.includes('xml')
+        contentType.includes('xml') ||
+        contentType.includes('html') ||
+        contentType === ''
       ) {
-        const text = await clone.text();
-        send({
-          kind: 'js-capture',
-          subtype: 'fetch-response',
-          url,
-          method,
-          code: truncate(text),
-          timestamp: Date.now(),
-          pageUrl,
-        });
+        text = await clone.text();
+      } else {
+        text = `[binary content-type=${contentType}]`;
       }
+      send({
+        kind: 'js-capture',
+        subtype: 'fetch-response',
+        url,
+        method,
+        headers: respHeaders,
+        code: truncate(text),
+        status: response.status,
+        mimeType: contentType,
+        captureId,
+        timestamp: Date.now(),
+        pageUrl,
+      });
     } catch {
       // Body read failed — ignore.
     }
@@ -256,6 +307,7 @@ if (_W.__harSuiteJsCapture) {
       return origOpen(method, url, async ?? true, user, password);
     };
 
+    const captureId = `jsxhr:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
     xhr.send = function (body?: Document | XMLHttpRequestBodyInit | null) {
       if (body != null) {
         send({
@@ -263,13 +315,34 @@ if (_W.__harSuiteJsCapture) {
           subtype: 'xhr-send',
           url: reqUrl,
           method: reqMethod,
-          body: truncate(typeof body === 'string' ? body : '[non-string body]'),
+          body: truncate(typeof body === 'string' ? body : bodyToString(body)),
+          captureId,
           timestamp: Date.now(),
           pageUrl,
         });
       }
       return origSend(body);
     };
+
+    xhr.addEventListener('loadend', function () {
+      try {
+        const ct = xhr.getResponseHeader('content-type') || '';
+        let bodyText: string | undefined;
+        if (typeof xhr.responseText === 'string') bodyText = xhr.responseText;
+        send({
+          kind: 'js-capture',
+          subtype: 'xhr-load',
+          url: reqUrl,
+          method: reqMethod,
+          status: xhr.status,
+          mimeType: ct,
+          code: truncate(bodyText),
+          captureId,
+          timestamp: Date.now(),
+          pageUrl,
+        });
+      } catch {}
+    });
 
     return xhr;
   }
@@ -381,5 +454,78 @@ if (_W.__harSuiteJsCapture) {
     (window as any).SharedWorker.prototype = OrigSharedWorker.prototype;
   }
 
-  console.log('[HAR Suite] JS capture active — inline scripts, eval, fetch/XHR, beacon, workers');
+  // ─── 10. WebSocket frames (mobile parity with desktop CDP ws-message) ───
+  const OrigWebSocket = window.WebSocket;
+  function CapturedWebSocket(this: any, url: string | URL, protocols?: string | string[]) {
+    const ws = protocols !== undefined ? new OrigWebSocket(url, protocols) : new OrigWebSocket(url);
+    const wsUrl = typeof url === 'string' ? url : url.href;
+    const captureId = `jsws:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+    send({
+      kind: 'js-capture',
+      subtype: 'ws-open',
+      url: wsUrl,
+      method: 'GET',
+      captureId,
+      timestamp: Date.now(),
+      pageUrl,
+    });
+    const origSend = ws.send.bind(ws);
+    ws.send = function (data: any) {
+      let payload: string;
+      if (typeof data === 'string') payload = data.slice(0, MAX_WS_PAYLOAD);
+      else if (data instanceof ArrayBuffer) payload = `[ArrayBuffer ${data.byteLength} bytes]`;
+      else if (ArrayBuffer.isView?.(data)) payload = `[TypedArray ${data.byteLength} bytes]`;
+      else if (data instanceof Blob) payload = `[Blob ${data.size} bytes]`;
+      else payload = String(data).slice(0, MAX_WS_PAYLOAD);
+      send({
+        kind: 'js-capture',
+        subtype: 'ws-send',
+        url: wsUrl,
+        body: payload,
+        direction: 'sent',
+        captureId,
+        timestamp: Date.now(),
+        pageUrl,
+      });
+      return origSend(data);
+    };
+    ws.addEventListener('message', (ev: MessageEvent) => {
+      let payload: string;
+      const data = ev.data;
+      if (typeof data === 'string') payload = data.slice(0, MAX_WS_PAYLOAD);
+      else if (data instanceof ArrayBuffer) payload = `[ArrayBuffer ${data.byteLength} bytes]`;
+      else if (data instanceof Blob) payload = `[Blob ${data.size} bytes]`;
+      else payload = String(data).slice(0, MAX_WS_PAYLOAD);
+      send({
+        kind: 'js-capture',
+        subtype: 'ws-message',
+        url: wsUrl,
+        body: payload,
+        direction: 'received',
+        captureId,
+        timestamp: Date.now(),
+        pageUrl,
+      });
+    });
+    ws.addEventListener('close', () => {
+      send({
+        kind: 'js-capture',
+        subtype: 'ws-close',
+        url: wsUrl,
+        captureId,
+        timestamp: Date.now(),
+        pageUrl,
+      });
+    });
+    return ws;
+  }
+  CapturedWebSocket.prototype = OrigWebSocket.prototype;
+  Object.defineProperty(CapturedWebSocket, 'CONNECTING', { value: OrigWebSocket.CONNECTING });
+  Object.defineProperty(CapturedWebSocket, 'OPEN', { value: OrigWebSocket.OPEN });
+  Object.defineProperty(CapturedWebSocket, 'CLOSING', { value: OrigWebSocket.CLOSING });
+  Object.defineProperty(CapturedWebSocket, 'CLOSED', { value: OrigWebSocket.CLOSED });
+  Object.defineProperty(CapturedWebSocket, 'toString', { value: () => 'function WebSocket() { [native code] }' });
+  (window as any).WebSocket = CapturedWebSocket;
+
+  console.log('[HAR Suite] JS capture active — fetch/XHR body, WS frames, eval, beacon, workers');
 }

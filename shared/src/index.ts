@@ -314,6 +314,10 @@ export interface CapturedRequest {
   initiator?: string;
   failed?: boolean;
   errorText?: string;
+  /** Redirect target URL when this request is a 3xx hop. */
+  redirectURL?: string;
+  /** Correlation id for JS-capture request/response pairs. */
+  captureId?: string;
   wsMessages?: WebSocketMessage[];
 }
 

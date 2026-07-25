@@ -134,6 +134,12 @@ async function snapshotCookies(url: string, host: string) {
       httpOnly: c.httpOnly,
       secure: c.secure,
       path: c.path,
+      sameSite: (c as any).sameSite,
+      expirationDate: (c as any).expirationDate,
+      session: (c as any).session,
+      // Chrome partitioned cookie support when available
+      partitionKey: (c as any).partitionKey,
+      storeId: (c as any).storeId,
     }));
     bridge.send({ kind: 'cookie-snapshot', host, url, cookies: cookieData } as any);
   } catch {
@@ -634,7 +640,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         captureMode: capture.attachedCount() > 0 ? 'debugger' : 'webRequest-fallback',
       });
 
-    } else if (msg?.kind === 'js-capture') {
+        } else if (msg?.kind === 'js-capture') {
       const tabId = _sender.tab?.id ?? -1;
       const pageUrl = _sender.tab?.url ?? msg.pageUrl ?? '';
       let pageHost = '';
@@ -647,39 +653,147 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         sendResponse({ ok: false, error: 'host-not-allowlisted' });
         return;
       }
-      // Dedupe against CDP-captured traffic (same method+url within window)
-      const jsDedupeKey = requestDedupeKey(tabId, msg.method || 'GET', msg.url || '');
+
+      const subtype = String(msg.subtype || '');
+      const captureId = String(msg.captureId || '');
+      const method = String(msg.method || 'GET').toUpperCase();
+      const url = String(msg.url || `inline://${subtype}`);
+
+      // WebSocket frame events
+      if (subtype === 'ws-open' || subtype === 'ws-send' || subtype === 'ws-message' || subtype === 'ws-close') {
+        const wsId = captureId || `js:ws:${tabId}:${url}`;
+        if (subtype === 'ws-open') {
+          if (shouldEmitRequest(tabId, 'GET', url, 'js-ws')) {
+            const req = {
+              id: wsId,
+              tabId,
+              source: 'web',
+              type: 'WebSocket',
+              method: 'GET',
+              url,
+              host: (() => { try { return new URL(url).host; } catch { return pageHost; } })(),
+              startedAt: Date.now(),
+              requestHeaders: [],
+              responseHeaders: [],
+              initiator: 'js-capture:ws',
+              wsMessages: [],
+            } as any;
+            recentRequests.set(wsId, req);
+            bridge.send({ kind: 'request', payload: req });
+          }
+        } else if (subtype === 'ws-send' || subtype === 'ws-message') {
+          const message = {
+            direction: subtype === 'ws-send' ? 'sent' : 'received',
+            timestamp: Date.now(),
+            opcode: 1,
+            payload: String(msg.body || '').slice(0, 64000),
+          };
+          const cur = recentRequests.get(wsId);
+          if (cur) {
+            cur.wsMessages = cur.wsMessages || [];
+            pushBounded(cur.wsMessages, message as any, MAX_WS_MESSAGES);
+          }
+          bridge.send({ kind: 'ws-message', id: wsId, message } as any);
+        }
+        sendResponse({ ok: true });
+        return;
+      }
+
+      // Response bodies from fetch/XHR: update existing request if known, else emit synthetic
+      if (subtype === 'fetch-response' || subtype === 'xhr-load') {
+        // Prefer patching a recently emitted request with same method+url
+        let targetId: string | undefined;
+        for (const [id, req] of recentRequests) {
+          if (req.tabId === tabId && (req.method || '').toUpperCase() === method && req.url === url) {
+            targetId = id;
+          }
+        }
+        if (captureId) {
+          // also try captureId synthetic ids
+          for (const [id, req] of recentRequests) {
+            if (id.includes(captureId) || (req as any).captureId === captureId) targetId = id;
+          }
+        }
+        const patch: any = {
+          status: msg.status,
+          responseMimeType: msg.mimeType,
+          responseBody: typeof msg.code === 'string' ? msg.code.slice(0, 200000) : undefined,
+          endedAt: Date.now(),
+        };
+        if (targetId) {
+          const cur = recentRequests.get(targetId);
+          if (cur) Object.assign(cur, patch);
+          bridge.send({ kind: 'request-update', id: targetId, patch });
+        } else if (shouldEmitRequest(tabId, method, url, 'js-response')) {
+          const id = `js:${captureId || Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+          const req = {
+            id,
+            tabId,
+            source: 'web',
+            type: subtype.startsWith('xhr') ? 'XHR' : 'Fetch',
+            method,
+            url,
+            host: (() => { try { return new URL(url).host; } catch { return pageHost; } })(),
+            startedAt: Date.now(),
+            requestHeaders: [],
+            responseHeaders: [],
+            responseBody: patch.responseBody,
+            status: patch.status,
+            responseMimeType: patch.mimeType,
+            initiator: `js-capture:${subtype}`,
+            captureId,
+          } as any;
+          recentRequests.set(id, req);
+          bridge.send({ kind: 'request', payload: req });
+        }
+        sendResponse({ ok: true });
+        return;
+      }
+
+      // Request-side JS capture (fetch/xhr/beacon/eval/etc)
+      const jsDedupeKey = requestDedupeKey(tabId, method, url);
       const nowJs = Date.now();
       const lastJs = Math.max(jsDedupe.get(jsDedupeKey) ?? 0, cdpDedupe.get(jsDedupeKey) ?? 0);
-      if (nowJs - lastJs < JS_DEDUPE_MS) {
+      // For pure script/eval events always emit; for network-like respect dedupe
+      const networkLike = subtype.includes('fetch') || subtype.includes('xhr') || subtype === 'beacon';
+      if (networkLike && nowJs - lastJs < JS_DEDUPE_MS) {
         sendResponse({ ok: true, deduped: true });
         return;
       }
       jsDedupe.set(jsDedupeKey, nowJs);
       cdpDedupe.set(jsDedupeKey, nowJs);
-      if (jsDedupe.size > 2000) {
-        const first = jsDedupe.keys().next().value;
-        if (first) jsDedupe.delete(first);
-      }
+
+      const type =
+        subtype.includes('fetch') ? 'Fetch' :
+        subtype.includes('xhr') ? 'XHR' :
+        subtype === 'beacon' ? 'Ping' :
+        subtype.includes('eval') || subtype.includes('function') ? 'Eval' :
+        subtype.includes('script') ? 'InlineScript' :
+        subtype.includes('worker') || subtype.includes('sw') ? 'ServiceWorker' : 'Script';
+
+      const id = `js:${captureId || Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+      const reqHeaders = msg.headers
+        ? Object.entries(msg.headers as Record<string, string>).map(([name, value]) => ({ name, value: String(value) }))
+        : [];
       bridge.send({
         kind: 'request',
         payload: {
-          id: `js:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
+          id,
           tabId,
           source: 'web',
-          type: 'Script',
-          method: msg.method ?? 'JS',
-          url: msg.url ?? `inline://${msg.subtype ?? 'capture'}`,
-          host: pageHost,
+          type,
+          method,
+          url,
+          host: (() => { try { return new URL(url).host; } catch { return pageHost; } })(),
           startedAt: Date.now(),
-          requestHeaders: [],
+          requestHeaders: reqHeaders,
           responseHeaders: [],
-          requestBody: typeof msg.body === 'string' ? msg.body.slice(0, 200000) : undefined,
-          initiator: `js-capture:${msg.subtype ?? 'unknown'}`,
+          requestBody: typeof msg.body === 'string' ? msg.body.slice(0, 200000) : (typeof msg.code === 'string' ? msg.code.slice(0, 200000) : undefined),
+          initiator: `js-capture:${subtype}`,
+          captureId,
         } as any,
       });
       sendResponse({ ok: true });
-
     } else if (msg?.kind === 'popup-clear-recent') {
       await clearRecentHosts();
       sendResponse({ ok: true });

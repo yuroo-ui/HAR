@@ -244,6 +244,9 @@ export async function getOrCreateActiveSession() {
 }
 
 export async function saveCookie(sessionId, cookie) {
+  const raw = cookie.raw || (cookie.sameSite || cookie.partitionKey || cookie.expirationDate
+    ? JSON.stringify({ sameSite: cookie.sameSite, partitionKey: cookie.partitionKey, expirationDate: cookie.expirationDate })
+    : null);
   const r = await getPool().query(
     `INSERT INTO cookies
      (session_id, host, name, value, domain, http_only, secure, path, source, url, raw, ts)
@@ -260,7 +263,7 @@ export async function saveCookie(sessionId, cookie) {
       cookie.path || null,
       cookie.source || null,
       cookie.url || null,
-      cookie.raw || null,
+      raw,
       cookie.ts || Date.now(),
     ],
   );
@@ -289,7 +292,9 @@ export async function saveCookiesBulk(sessionId, cookies) {
           cookie.path || null,
           cookie.source || null,
           cookie.url || null,
-          cookie.raw || null,
+          cookie.raw || (cookie.sameSite || cookie.partitionKey || cookie.expirationDate
+            ? JSON.stringify({ sameSite: cookie.sameSite, partitionKey: cookie.partitionKey, expirationDate: cookie.expirationDate })
+            : null),
           cookie.ts || Date.now(),
         ],
       );
@@ -318,21 +323,30 @@ export async function loadCookies(sessionId, { limit = 500, host = '', name = ''
   params.push(limit);
   sql += ` ORDER BY ts DESC LIMIT $${params.length}`;
   const r = await getPool().query(sql, params);
-  return r.rows.map((row) => ({
-    id: Number(row.id),
-    sessionId: Number(row.session_id),
-    host: row.host,
-    name: row.name,
-    value: row.value,
-    domain: row.domain,
-    httpOnly: !!row.http_only,
-    secure: !!row.secure,
-    path: row.path,
-    source: row.source,
-    url: row.url,
-    raw: row.raw,
-    ts: Number(row.ts),
-  }));
+  return r.rows.map((row) => {
+    let extra = {};
+    if (row.raw) {
+      try { const j = JSON.parse(row.raw); if (j && typeof j === 'object' && !Array.isArray(j)) extra = j; } catch {}
+    }
+    return {
+      id: Number(row.id),
+      sessionId: Number(row.session_id),
+      host: row.host,
+      name: row.name,
+      value: row.value,
+      domain: row.domain,
+      httpOnly: !!row.http_only,
+      secure: !!row.secure,
+      path: row.path,
+      source: row.source,
+      url: row.url,
+      raw: row.raw,
+      sameSite: extra.sameSite || null,
+      partitionKey: extra.partitionKey || null,
+      expirationDate: extra.expirationDate || null,
+      ts: Number(row.ts),
+    };
+  });
 }
 
 export async function clearCookies(sessionId) {
