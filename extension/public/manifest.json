@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "HAR Capture Suite",
-  "version": "0.5.1",
-  "description": "HAR Capture Suite v0.5.1 \u2014 extension allowlist syncs live to server",
+  "version": "0.5.2",
+  "description": "HAR Capture Suite v0.5.2 \u2014 captcha-safe (Turnstile/CF not broken by debugger)",
   "permissions": [
     "debugger",
     "tabs",
@@ -21,7 +21,18 @@
       "js": [
         "content-captcha.js"
       ],
-      "run_at": "document_start"
+      "run_at": "document_start",
+      "exclude_matches": [
+        "*://challenges.cloudflare.com/*",
+        "*://*.challenges.cloudflare.com/*",
+        "*://*.hcaptcha.com/*",
+        "*://*.recaptcha.net/*",
+        "*://www.google.com/recaptcha/*",
+        "*://www.gstatic.com/recaptcha/*",
+        "*://*.funcaptcha.com/*",
+        "*://*.arkoselabs.com/*"
+      ],
+      "all_frames": false
     },
     {
       "matches": [
@@ -31,7 +42,18 @@
         "content-js-capture.js"
       ],
       "run_at": "document_start",
-      "world": "MAIN"
+      "world": "MAIN",
+      "exclude_matches": [
+        "*://challenges.cloudflare.com/*",
+        "*://*.challenges.cloudflare.com/*",
+        "*://*.hcaptcha.com/*",
+        "*://*.recaptcha.net/*",
+        "*://www.google.com/recaptcha/*",
+        "*://www.gstatic.com/recaptcha/*",
+        "*://*.funcaptcha.com/*",
+        "*://*.arkoselabs.com/*"
+      ],
+      "all_frames": false
     }
   ],
   "web_accessible_resources": [

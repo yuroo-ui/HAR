@@ -465,17 +465,28 @@ async function injectCaptchaScanner(tabId: number, url: string) {
   const last = injectedScanner.get(tabId);
   if (last === url) return;
   try {
+    // Captcha scanner: all frames, but script self-exits inside CF/hCaptcha/recaptcha frames.
     await chrome.scripting.executeScript({
       target: { tabId, allFrames: true },
       files: ['content-captcha.js'],
     });
-    // JS capture (fetch/XHR/eval/beacon) — useful custom, keep with waguri base
+    // JS capture: TOP FRAME ONLY.
+    // Injecting fetch/XHR/WebSocket hooks into Turnstile OOPIFs breaks the widget
+    // (postMessage origin mismatch + Error 300030).
     try {
       await chrome.scripting.executeScript({
-        target: { tabId, allFrames: true },
+        target: { tabId, allFrames: false },
         files: ['content-js-capture.js'],
-      });
-    } catch {}
+        world: 'MAIN',
+      } as chrome.scripting.ScriptInjection<any, any>);
+    } catch {
+      try {
+        await chrome.scripting.executeScript({
+          target: { tabId, allFrames: false },
+          files: ['content-js-capture.js'],
+        });
+      } catch {}
+    }
     injectedScanner.set(tabId, url);
   } catch {
     // chrome://, about:, file:// etc. reject injection — that's fine.

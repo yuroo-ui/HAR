@@ -13,7 +13,29 @@ type DomHit = {
 // be loaded multiple times into the same realm; we don't want to re-attach observers
 // or re-inject the page-world hook each time.
 const W = window as unknown as { __harSuiteCaptchaInstalled?: boolean };
-if (W.__harSuiteCaptchaInstalled) {
+
+// Never run captcha hooks inside the captcha providers themselves — breaks Turnstile
+// postMessage + causes Error 300030 / widget hung.
+function isDomCaptchaProviderFrame(): boolean {
+  try {
+    const h = location.hostname;
+    return (
+      h.endsWith('challenges.cloudflare.com') ||
+      h === 'challenges.cloudflare.com' ||
+      h.endsWith('hcaptcha.com') ||
+      h.endsWith('recaptcha.net') ||
+      h === 'www.google.com' && location.pathname.includes('/recaptcha/') ||
+      h.endsWith('funcaptcha.com') ||
+      h.endsWith('arkoselabs.com')
+    );
+  } catch {
+    return false;
+  }
+}
+
+if (isDomCaptchaProviderFrame()) {
+  // no-op inside provider iframe
+} else if (W.__harSuiteCaptchaInstalled) {
   // Already running — exit silently.
 } else {
   W.__harSuiteCaptchaInstalled = true;
@@ -195,8 +217,9 @@ if (W.__harSuiteCaptchaInstalled) {
   // If grecaptcha is already present, attach immediately.
   if (window.grecaptcha) attach(window.grecaptcha);
   if (window.hcaptcha) { wrap(window.hcaptcha, 'execute', 'hcaptcha'); wrap(window.hcaptcha, 'render', 'hcaptcha'); }
-  if (window.turnstile) { wrap(window.turnstile, 'render', 'turnstile'); wrap(window.turnstile, 'execute', 'turnstile'); }
-  // Intercept future assignments.
+  // Turnstile: DOM/sitekey detection is enough. Do NOT defineProperty(window.turnstile)
+  // and do NOT wrap render/execute — that breaks CF challenge postMessage (Error 300030).
+  // Intercept future grecaptcha/hcaptcha assignments only.
   var _g; try { Object.defineProperty(window, 'grecaptcha', {
     configurable: true,
     get: function() { return _g; },
@@ -206,11 +229,6 @@ if (W.__harSuiteCaptchaInstalled) {
     configurable: true,
     get: function() { return _h; },
     set: function(v) { _h = v; if (v) { wrap(v, 'execute', 'hcaptcha'); wrap(v, 'render', 'hcaptcha'); } }
-  }); } catch (e) {}
-  var _t; try { Object.defineProperty(window, 'turnstile', {
-    configurable: true,
-    get: function() { return _t; },
-    set: function(v) { _t = v; if (v) { wrap(v, 'render', 'turnstile'); wrap(v, 'execute', 'turnstile'); } }
   }); } catch (e) {}
 })();
 `;

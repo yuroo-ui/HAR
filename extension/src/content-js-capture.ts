@@ -41,11 +41,30 @@ type JsCaptureEvent = {
   pageUrl: string;
 };
 
+function isJsCaptchaProviderFrame(): boolean {
+  try {
+    const h = location.hostname;
+    return (
+      h.endsWith('challenges.cloudflare.com') ||
+      h.endsWith('hcaptcha.com') ||
+      h.endsWith('recaptcha.net') ||
+      (h === 'www.google.com' && location.pathname.includes('/recaptcha/')) ||
+      h.endsWith('funcaptcha.com') ||
+      h.endsWith('arkoselabs.com')
+    );
+  } catch {
+    return false;
+  }
+}
+
 const MAX_CODE_LENGTH = 200_000;
 const MAX_WS_PAYLOAD = 64_000;
 const _W = window as unknown as { __harSuiteJsCapture?: boolean };
 
-if (_W.__harSuiteJsCapture) {
+// Never instrument captcha provider frames — breaks Turnstile postMessage (300030).
+if (isJsCaptchaProviderFrame()) {
+  // no-op
+} else if (_W.__harSuiteJsCapture) {
   // Already running — skip.
 } else {
   _W.__harSuiteJsCapture = true;

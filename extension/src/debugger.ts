@@ -18,7 +18,30 @@ const DEBUGGER_PROTOCOL = '1.3';
 // frozen until we call Runtime.runIfWaitingForDebugger, so the resume MUST always
 // fire (see the `finally` in onAttachedToTarget). If paused-iframe hangs are ever
 // observed (e.g. under MV3 service-worker eviction), flip this to `false`.
-const WAIT_FOR_DEBUGGER = true;
+// IMPORTANT: pausing OOPIF on start breaks Cloudflare Turnstile / hCaptcha
+// (widget hung, Error 300030, postMessage origin mismatch). Keep false so
+// captcha frames run immediately; we still enable Network ASAP after attach.
+const WAIT_FOR_DEBUGGER = false;
+
+/** Child targets we must NOT debugger-attach into (breaks interactive captcha). */
+function isCaptchaProtectedTarget(url: string | undefined, title?: string): boolean {
+  const u = (url || '').toLowerCase();
+  const t = (title || '').toLowerCase();
+  if (!u && !t) return false;
+  return (
+    u.includes('challenges.cloudflare.com') ||
+    u.includes('turnstile') ||
+    u.includes('cf-turnstile') ||
+    u.includes('google.com/recaptcha') ||
+    u.includes('recaptcha.net') ||
+    u.includes('hcaptcha.com') ||
+    u.includes('newassets.hcaptcha.com') ||
+    u.includes('funcaptcha.com') ||
+    u.includes('arkoselabs.com') ||
+    u.includes('client-api.arkoselabs.com') ||
+    t.includes('cloudflare') && t.includes('challenge')
+  );
+}
 
 // Which child target types to auto-attach into. "iframe" here means out-of-process
 // (cross-origin) iframes — same-process frames already flow on the parent session.
@@ -197,6 +220,17 @@ export class DebuggerCapture {
       return;
     }
 
+    // Captcha / challenge frames: resume only, DO NOT enable Network/autoAttach.
+    // Debugger presence + script injection inside Turnstile causes:
+    //  - Error 300030 / "Turnstile Widget seem to have hung"
+    //  - postMessage target origin mismatch
+    const childUrl: string | undefined = info?.url;
+    if (isCaptchaProtectedTarget(childUrl, info?.title)) {
+      console.log('[debugger] skip captcha frame', childUrl);
+      await this.safeResume(childTarget, waiting);
+      return;
+    }
+
     this.sessions.set(sessionId, {
       sessionId,
       tabId: parentTabId,
@@ -208,7 +242,7 @@ export class DebuggerCapture {
     try {
       await chrome.debugger.sendCommand(childTarget, 'Network.enable', {});
       // Auto-attach is NOT recursive — re-arm on the child so nested OOPIFs/workers
-      // (e.g. the reCAPTCHA challenge bframe inside the anchor iframe) attach too.
+      // attach too. Captcha frames are filtered out above.
       await chrome.debugger.sendCommand(childTarget, 'Target.setAutoAttach', {
         autoAttach: true,
         waitForDebuggerOnStart: WAIT_FOR_DEBUGGER,
