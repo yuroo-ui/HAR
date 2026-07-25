@@ -11,10 +11,15 @@ const HOST = process.env.HOST || '0.0.0.0';
 // ── In-memory store ──
 // sessionId is auto-increment int, active session is the open one.
 // All data in memory; also persisted to SQLite (optional, low dep).
-import { initDb, loadRequests, saveRequest, updateRequest, appendWsMessage,
+import {
+  initStore, storeBackend, loadRequests, saveRequest, updateRequest, appendWsMessage,
   saveCaptcha, loadCaptchas, listSessions, getOrCreateActiveSession,
   createSession, deleteSession, renameSession, clearRequests,
-  countRequests, getPref, setPref, getOrCreateActiveSession as _noop } from './db.js';
+  countRequests, getPref, setPref, saveCookie, saveCookiesBulk, loadCookies,
+  clearCookies, exportCookieJar, publishStatus,
+} from './store.js';
+import { awsEnabled } from './aws-store.js';
+import { redisEnabled, redisPing, redisMarkExtConnected } from './redis-store.js';
 
 const BRIDGE_VERSION = 2;
 
@@ -29,6 +34,90 @@ function generateToken() {
   let t = '';
   for (let i = 0; i < 12; i++) t += chars[Math.floor(Math.random() * chars.length)];
   return t;
+}
+
+const MAX_BODY = Number(process.env.HAR_MAX_BODY || 200000);
+const BODY_KEEP_TYPES = new Set(['XHR', 'Fetch', 'Document', 'Script', 'Other', 'WebSocket', 'Ping', 'EventSource']);
+const BODY_DROP_TYPES = new Set(['Image', 'Stylesheet', 'Font', 'Media', 'TextTrack', 'Prefetch', 'Manifest']);
+
+function truncateBodies(req) {
+  if (!req || typeof req !== 'object') return req;
+  const out = { ...req };
+  const type = out.type || 'Other';
+  // Never keep bodies for static assets
+  if (BODY_DROP_TYPES.has(type)) {
+    if (out.responseBody) {
+      out.responseBody = undefined;
+      out.responseBodyDropped = true;
+    }
+    if (out.requestBody && type !== 'Document') {
+      // keep form POST bodies on Document; drop request bodies on pure static types
+      out.requestBody = undefined;
+      out.requestBodyDropped = true;
+    }
+    return out;
+  }
+  // Only keep full-ish bodies for data-like types
+  if (!BODY_KEEP_TYPES.has(type)) {
+    if (typeof out.responseBody === 'string' && out.responseBody.length > 4096) {
+      out.responseBody = out.responseBody.slice(0, 4096);
+      out.responseBodyTruncated = true;
+    }
+  }
+  if (typeof out.responseBody === 'string' && out.responseBody.length > MAX_BODY) {
+    out.responseBody = out.responseBody.slice(0, MAX_BODY);
+    out.responseBodyTruncated = true;
+  }
+  if (typeof out.requestBody === 'string' && out.requestBody.length > MAX_BODY) {
+    out.requestBody = out.requestBody.slice(0, MAX_BODY);
+    out.requestBodyTruncated = true;
+  }
+  return out;
+}
+
+function toNetscapeCookieJar(jar) {
+  const lines = ['# Netscape HTTP Cookie File', '# https://curl.se/docs/http-cookies.html', ''];
+  for (const c of jar || []) {
+    const domain = c.domain || c.host || '';
+    const includeSub = domain.startsWith('.') ? 'TRUE' : 'FALSE';
+    const path = c.path || '/';
+    const secure = c.secure ? 'TRUE' : 'FALSE';
+    const exp = '0';
+    lines.push([domain || (c.host || ''), includeSub, path, secure, exp, c.name || '', c.value || ''].join('\t'));
+  }
+  return lines.join('\n');
+}
+
+function groupCookieHeaders(jar) {
+  const byHost = {};
+  for (const c of jar || []) {
+    const h = c.host || c.domain || 'unknown';
+    if (!byHost[h]) byHost[h] = [];
+    byHost[h].push(`${c.name}=${c.value}`);
+  }
+  const headers = {};
+  for (const [h, parts] of Object.entries(byHost)) headers[h] = parts.join('; ');
+  return headers;
+}
+
+let lastCookieAt = 0;
+let lastRequestAt = 0;
+let lastExtEventAt = 0;
+
+async function persistRequest(sessionId, req) {
+  const slim = truncateBodies(req);
+  try { await saveRequest(sessionId, slim); } catch (e) { console.warn('[store] saveRequest', e.message); }
+  lastRequestAt = Date.now();
+  lastExtEventAt = lastRequestAt;
+  return slim;
+}
+
+async function persistCookieRows(sessionId, rows) {
+  try { await saveCookiesBulk(sessionId, rows); } catch (e) { console.warn('[store] cookies', e.message); }
+  if (rows?.length) {
+    lastCookieAt = Date.now();
+    lastExtEventAt = lastCookieAt;
+  }
 }
 
 function broadcastToUi(obj) {
@@ -119,24 +208,24 @@ const server = http.createServer(async (req, res) => {
     // REST API for web UI (mirrors Electron IPC surface via HTTP)
     // GET /api/sessions
     if (pathname === '/api/sessions' && req.method === 'GET') {
-      return json(res, { sessions: listSessions(), currentId: activeSessionId });
+      return json(res, { sessions: await listSessions(), currentId: activeSessionId });
     }
     // POST /api/sessions {name?}
     if (pathname === '/api/sessions' && req.method === 'POST') {
       const body = await readJson(req).catch(() => ({}));
-      const id = createSession(body.name);
+      const id = await createSession(body.name);
       activeSessionId = id;
-      return json(res, { id, sessions: listSessions(), currentId: id });
+      return json(res, { id, sessions: await listSessions(), currentId: id });
     }
     // DELETE /api/sessions/:id
     if (pathname.startsWith('/api/sessions/') && req.method === 'DELETE') {
       const id = Number(pathname.split('/')[3]);
-      deleteSession(id);
+      await deleteSession(id);
       if (activeSessionId === id) {
-        const fallback = getOrCreateActiveSession();
+        const fallback = await getOrCreateActiveSession();
         activeSessionId = fallback;
       }
-      return json(res, { ok: true, sessions: listSessions(), currentId: activeSessionId });
+      return json(res, { ok: true, sessions: await listSessions(), currentId: activeSessionId });
     }
     // POST /api/sessions/:id/open | rename
     if (pathname.startsWith('/api/sessions/') && req.method === 'POST') {
@@ -147,24 +236,24 @@ const server = http.createServer(async (req, res) => {
         activeSessionId = id;
         return json(res, {
           sessionId: id,
-          requests: loadRequests(id, { limit: 1000 }),
-          captchas: loadCaptchas(id),
-          sessions: listSessions(),
+          requests: await loadRequests(id, { limit: 1000 }),
+          captchas: await loadCaptchas(id),
+          sessions: await listSessions(),
           currentId: id,
         });
       }
       if (action === 'rename') {
         const body = await readJson(req).catch(() => ({}));
-        renameSession(id, body.name || '');
-        return json(res, { ok: true, sessions: listSessions() });
+        await renameSession(id, body.name || '');
+        return json(res, { ok: true, sessions: await listSessions() });
       }
     }
     // GET /api/session/current -> {id, requests, captchas}
     if (pathname === '/api/session/current' && req.method === 'GET') {
       return json(res, {
         sessionId: activeSessionId,
-        requests: loadRequests(activeSessionId, { limit: 2000 }),
-        captchas: loadCaptchas(activeSessionId),
+        requests: await loadRequests(activeSessionId, { limit: 2000 }),
+        captchas: await loadCaptchas(activeSessionId),
       });
     }
     // GET /api/requests?limit&offset&q&host&method
@@ -176,40 +265,89 @@ const server = http.createServer(async (req, res) => {
       const method = url.searchParams.get('method') || '';
       const sessionId = Number(url.searchParams.get('sessionId') || activeSessionId);
       return json(res, {
-        requests: loadRequests(sessionId, { limit, offset, q, host, method }),
-        total: countRequests(sessionId),
+        requests: await loadRequests(sessionId, { limit, offset, q, host, method }),
+        total: await countRequests(sessionId),
       });
     }
     // DELETE /api/requests (clear active)
     if (pathname === '/api/requests' && req.method === 'DELETE') {
       const sessionId = Number(url.searchParams.get('sessionId') || activeSessionId);
-      clearRequests(sessionId);
+      await clearRequests(sessionId);
       broadcastToUi({ type: 'cleared', sessionId });
       return json(res, { ok: true });
     }
     // GET /api/captchas
     if (pathname === '/api/captchas' && req.method === 'GET') {
       const sid = Number(url.searchParams.get('sessionId') || activeSessionId);
-      return json(res, { captchas: loadCaptchas(sid) });
+      return json(res, { captchas: await loadCaptchas(sid) });
     }
     // GET /api/status
     if (pathname === '/api/status' && req.method === 'GET') {
+      const cookieCount = (await loadCookies(activeSessionId, { limit: 5000 })).length;
+      let redisOk = false;
+      try {
+        const { redisPing } = await import('./redis-store.js');
+        redisOk = await redisPing();
+      } catch {}
+      let dbOk = true;
+      try { await countRequests(activeSessionId); } catch { dbOk = false; }
+      const now = Date.now();
       return json(res, {
-        allowlist: getPref('allowlist', []),
-        captureEnabled: getPref('captureEnabled', true),
-        scope: getPref('scope', 'data'),
+        cookieCount,
+        awsDualWrite: awsEnabled(),
+        backend: storeBackend(),
+        redis: redisEnabled(),
+        redisOk,
+        dbOk,
+        health: {
+          ok: dbOk && (extClients.size >= 0),
+          extensionConnected: extClients.size > 0,
+          extensionClients: extClients.size,
+          lastCookieAt,
+          lastRequestAt,
+          lastExtEventAt,
+          cookieAgeMs: lastCookieAt ? now - lastCookieAt : null,
+          requestAgeMs: lastRequestAt ? now - lastRequestAt : null,
+          uptimeSec: Math.floor(process.uptime()),
+        },
+        allowlist: await getPref('allowlist', []),
+        captureEnabled: await getPref('captureEnabled', true),
+        scope: await getPref('scope', 'data'),
         connected: extClients.size > 0,
         token: bridgeToken,
         sessionId: activeSessionId,
-        sessions: listSessions(),
-        requestCount: countRequests(activeSessionId),
+        sessions: await listSessions(),
+        requestCount: await countRequests(activeSessionId),
+      });
+    }
+    // GET /api/health — compact operator health
+    if (pathname === '/api/health' && req.method === 'GET') {
+      let redisOk = false;
+      try {
+        const { redisPing } = await import('./redis-store.js');
+        redisOk = await redisPing();
+      } catch {}
+      let dbOk = true;
+      try { await countRequests(activeSessionId); } catch { dbOk = false; }
+      return json(res, {
+        ok: dbOk,
+        backend: storeBackend(),
+        redisOk,
+        awsDualWrite: awsEnabled(),
+        extensionConnected: extClients.size > 0,
+        extensionClients: extClients.size,
+        lastCookieAt,
+        lastRequestAt,
+        lastExtEventAt,
+        sessionId: activeSessionId,
+        uptimeSec: Math.floor(process.uptime()),
       });
     }
     // POST /api/allowlist {domains: string[]}
     if (pathname === '/api/allowlist' && req.method === 'POST') {
       const body = await readJson(req).catch(() => ({}));
       const domains = Array.isArray(body.domains) ? body.domains : [];
-      setPref('allowlist', domains);
+      await setPref('allowlist', domains);
       // Push to extensions
       const msg = { kind: 'set-allowlist', domains };
       const raw = JSON.stringify(msg);
@@ -221,14 +359,14 @@ const server = http.createServer(async (req, res) => {
     // POST /api/capture {enabled: bool}
     if (pathname === '/api/capture' && req.method === 'POST') {
       const body = await readJson(req).catch(() => ({}));
-      setPref('captureEnabled', !!body.enabled);
-      setPref('scope', body.scope || getPref('scope', 'data'));
+      await setPref('captureEnabled', !!body.enabled);
+      await setPref('scope', body.scope || (await getPref('scope', 'data')));
       const msg = { kind: 'set-capture', enabled: !!body.enabled };
       const raw = JSON.stringify(msg);
       for (const ws of extClients) {
         if (ws.readyState === WebSocket.OPEN) try { ws.send(raw); } catch {}
       }
-      const scopeMsg = { kind: 'set-capture-scope', scope: body.scope || getPref('scope', 'data') };
+      const scopeMsg = { kind: 'set-capture-scope', scope: body.scope || (await getPref('scope', 'data')) };
       const scopeRaw = JSON.stringify(scopeMsg);
       for (const ws of extClients) {
         if (ws.readyState === WebSocket.OPEN) try { ws.send(scopeRaw); } catch {}
@@ -238,13 +376,13 @@ const server = http.createServer(async (req, res) => {
     // POST /api/token/regenerate
     if (pathname === '/api/token/regenerate' && req.method === 'POST') {
       bridgeToken = generateToken();
-      setPref('bridgeToken', bridgeToken);
+      await setPref('bridgeToken', bridgeToken);
       return json(res, { token: bridgeToken });
     }
     // GET /api/export?sessionId&format=har
     if (pathname === '/api/export' && req.method === 'GET') {
       const sid = Number(url.searchParams.get('sessionId') || activeSessionId);
-      const reqs = loadRequests(sid, { limit: 5000 });
+      const reqs = await loadRequests(sid, { limit: 5000 });
       return json(res, { requests: reqs });
     }
 
@@ -254,12 +392,12 @@ const server = http.createServer(async (req, res) => {
     }
     // GET /api/redaction
     if (pathname === '/api/redaction' && req.method === 'GET') {
-      return json(res, { config: getPref('redaction', null) });
+      return json(res, { config: await getPref('redaction', null) });
     }
     // POST /api/redaction {config}
     if (pathname === '/api/redaction' && req.method === 'POST') {
       const body = await readJson(req).catch(() => ({}));
-      setPref('redaction', body.config || null);
+      await setPref('redaction', body.config || null);
       return json(res, { ok: true });
     }
     // DELETE /api/captchas
@@ -275,9 +413,9 @@ const server = http.createServer(async (req, res) => {
       }
       return json(res, {
         ok: true,
-        allowlist: getPref('allowlist', []),
-        captureEnabled: getPref('captureEnabled', true),
-        scope: getPref('scope', 'data'),
+        allowlist: await getPref('allowlist', []),
+        captureEnabled: await getPref('captureEnabled', true),
+        scope: await getPref('scope', 'data'),
         sessionId: activeSessionId,
         connected: true,
       });
@@ -292,41 +430,94 @@ const server = http.createServer(async (req, res) => {
       // Process the message same as WS bridge
       const k = body.kind;
       if (k === 'request') {
-        const req2 = body.payload;
-        try { saveRequest(activeSessionId, req2); } catch (e) { console.warn('[store] saveRequest', e.message); }
+        const req2 = await persistRequest(activeSessionId, body.payload || {});
         broadcastToUi({ type: 'request', request: req2 });
       } else if (k === 'request-update') {
         const { id, patch } = body;
-        try { updateRequest(activeSessionId, id, patch); } catch {}
+        try { await updateRequest(activeSessionId, id, patch); } catch {}
         broadcastToUi({ type: 'update', id, patch });
       } else if (k === 'ws-message') {
         const { id, message } = body;
-        try { appendWsMessage(activeSessionId, id, message); } catch {}
+        try { await appendWsMessage(activeSessionId, id, message); } catch {}
         broadcastToUi({ type: 'ws-message', id, message });
       } else if (k === 'captcha-detected') {
         const det = body.payload;
-        try { saveCaptcha(activeSessionId, det); } catch (e) { console.warn('[store] captcha', e.message); }
+        try { await saveCaptcha(activeSessionId, det); } catch (e) { console.warn('[store] captcha', e.message); }
         broadcastToUi({ type: 'captcha', captcha: det });
       } else if (k === 'cookie-snapshot') {
-        console.log('[bridge] cookie-snapshot (http) from', body.host, ':', (body.cookies||[]).map(c => c.name).join(', '));
-        broadcastToUi({ type: 'cookie-snapshot', host: body.host, url: body.url, cookies: body.cookies });
+        const host = body.host || '';
+        const url = body.url || '';
+        const rows = (body.cookies || []).map((c) => ({ host, url, name: c.name, value: c.value, domain: c.domain, httpOnly: !!c.httpOnly, secure: !!c.secure, path: c.path, source: 'cookie-snapshot', ts: Date.now() }));
+        console.log('[bridge] cookie-snapshot (http) from', host, ':', rows.map((c) => c.name).join(', '));
+        await persistCookieRows(activeSessionId, rows);
+        broadcastToUi({ type: 'cookie-snapshot', host, url, cookies: body.cookies, sessionId: activeSessionId });
       } else if (k === 'set-cookie-capture') {
-        console.log('[bridge] set-cookie-capture (http) from', body.host, ':', (body.cookies||[]).map(c => c.split('=')[0]).join(', '));
-        broadcastToUi({ type: 'set-cookie-capture', host: body.host, url: body.url, cookies: body.cookies });
+        const host = body.host || '';
+        const url = body.url || '';
+        const rows = (body.cookies || []).map((raw) => {
+          const s = String(raw || '');
+          const name = s.split('=')[0]?.trim() || '';
+          const value = s.slice(name.length + 1).split(';')[0] || '';
+          return { host, url, name, value, domain: host, httpOnly: /httponly/i.test(s), secure: /secure/i.test(s), path: (s.match(/path=([^;]+)/i) || [])[1] || null, source: 'set-cookie', raw: s, ts: Date.now() };
+        });
+        console.log('[bridge] set-cookie-capture (http) from', host, ':', rows.map((c) => c.name).join(', '));
+        await persistCookieRows(activeSessionId, rows);
+        broadcastToUi({ type: 'set-cookie-capture', host, url, cookies: body.cookies, sessionId: activeSessionId });
       }
+      return json(res, { ok: true });
+    }
+    // GET /api/cookies
+    if (pathname === '/api/cookies' && req.method === 'GET') {
+      const sid = Number(url.searchParams.get('sessionId') || activeSessionId);
+      const limit = Math.min(Number(url.searchParams.get('limit') || 500), 5000);
+      const host = url.searchParams.get('host') || '';
+      const name = url.searchParams.get('name') || '';
+      let cookies = await loadCookies(sid, { limit, host, name });
+      if (url.searchParams.get('httpOnly') === '1') cookies = cookies.filter((c) => c.httpOnly);
+      return json(res, { cookies, sessionId: sid, aws: awsEnabled(), backend: storeBackend(), redis: redisEnabled() });
+    }
+    // GET /api/cookies/export?format=json|header|netscape|latest
+    if (pathname === '/api/cookies/export' && req.method === 'GET') {
+      const sid = Number(url.searchParams.get('sessionId') || activeSessionId);
+      const format = (url.searchParams.get('format') || 'json').toLowerCase();
+      const host = url.searchParams.get('host') || '';
+      let jar = await exportCookieJar(sid);
+      if (host) jar = jar.filter((c) => (c.host || '').includes(host) || (c.domain || '').includes(host));
+      const headersByHost = groupCookieHeaders(jar);
+      const asHeader = jar.map((c) => `${c.name}=${c.value}`).join('; ');
+      if (format === 'netscape' || format === 'txt') {
+        res.writeHead(200, {
+          'Content-Type': 'text/plain; charset=utf-8',
+          'Content-Disposition': 'attachment; filename="cookies.txt"',
+          'Access-Control-Allow-Origin': '*',
+        });
+        return res.end(toNetscapeCookieJar(jar));
+      }
+      if (format === 'header') {
+        return json(res, { sessionId: sid, count: jar.length, cookieHeader: asHeader, headersByHost });
+      }
+      if (format === 'latest') {
+        return json(res, { sessionId: sid, count: jar.length, jar, cookieHeader: asHeader, headersByHost });
+      }
+      return json(res, { sessionId: sid, count: jar.length, jar, cookieHeader: asHeader, headersByHost, netscape: toNetscapeCookieJar(jar) });
+    }
+    // DELETE /api/cookies
+    if (pathname === '/api/cookies' && req.method === 'DELETE') {
+      const sid = Number(url.searchParams.get('sessionId') || activeSessionId);
+      await clearCookies(sid);
       return json(res, { ok: true });
     }
     // GET /api/export/:format
     if (pathname.startsWith('/api/export/') && req.method === 'GET') {
       const fmt = pathname.split('/')[3] || 'har';
       const sid = Number(url.searchParams.get('sessionId') || activeSessionId);
-      const reqs = loadRequests(sid, { limit: 5000 });
+      const reqs = await loadRequests(sid, { limit: 5000 });
       return json(res, { requests: reqs, format: fmt });
     }
     // GET /api/requests/:id/to-curl
     if (pathname.match(/^\/api\/requests\/[^/]+\/to-curl$/) && req.method === 'GET') {
       const id = pathname.split('/')[3];
-      const reqs = loadRequests(activeSessionId, { limit: 5000 });
+      const reqs = await loadRequests(activeSessionId, { limit: 5000 });
       const r = reqs.find(x => x.id === id);
       if (!r) return json(res, { error: 'not found' }, 404);
       const curl = `curl -X ${r.method} '${r.url}'${(r.requestHeaders||[]).map(h => ` -H '${h.name}: ${h.value}'`).join('')}${r.requestBody ? ` -d '${r.requestBody.replace(/'/g, "\\'")}'` : ''}`;
@@ -335,7 +526,7 @@ const server = http.createServer(async (req, res) => {
     // GET /api/requests/:id/to-fetch
     if (pathname.match(/^\/api\/requests\/[^/]+\/to-fetch$/) && req.method === 'GET') {
       const id = pathname.split('/')[3];
-      const reqs = loadRequests(activeSessionId, { limit: 5000 });
+      const reqs = await loadRequests(activeSessionId, { limit: 5000 });
       const r = reqs.find(x => x.id === id);
       if (!r) return json(res, { error: 'not found' }, 404);
       const headers = (r.requestHeaders||[]).map(h => `  '${h.name}': '${h.value}'`).join(',\n');
@@ -345,7 +536,7 @@ const server = http.createServer(async (req, res) => {
     // GET /api/requests/:id/copy-url
     if (pathname.match(/^\/api\/requests\/[^/]+\/copy-url$/) && req.method === 'GET') {
       const id = pathname.split('/')[3];
-      const reqs = loadRequests(activeSessionId, { limit: 5000 });
+      const reqs = await loadRequests(activeSessionId, { limit: 5000 });
       const r = reqs.find(x => x.id === id);
       if (!r) return json(res, { error: 'not found' }, 404);
       return json(res, { url: r.url });
@@ -430,7 +621,7 @@ wssBridge.on('connection', (ws, req) => {
     }
   }, AUTH_GRACE);
 
-  ws.on('message', (data) => {
+  ws.on('message', async (data) => {
     let msg;
     try { msg = JSON.parse(data.toString()); } catch {
       if (!authed) ws.send(JSON.stringify({ kind: 'auth-fail', reason: 'malformed handshake' }));
@@ -462,14 +653,14 @@ wssBridge.on('connection', (ws, req) => {
       extClients.add(ws);
       ws.send(JSON.stringify({ kind: 'auth-ok' }));
       // Push current config
-      ws.send(JSON.stringify({ kind: 'set-allowlist', domains: getPref('allowlist', []) }));
-      ws.send(JSON.stringify({ kind: 'set-capture', enabled: getPref('captureEnabled', true) }));
-      ws.send(JSON.stringify({ kind: 'set-capture-scope', scope: getPref('scope', 'data') }));
+      ws.send(JSON.stringify({ kind: 'set-allowlist', domains: await getPref('allowlist', []) }));
+      ws.send(JSON.stringify({ kind: 'set-capture', enabled: await getPref('captureEnabled', true) }));
+      ws.send(JSON.stringify({ kind: 'set-capture-scope', scope: await getPref('scope', 'data') }));
       ws.send(JSON.stringify({
         kind: 'status',
-        capturing: getPref('captureEnabled', true),
-        allowlist: getPref('allowlist', []),
-        scope: getPref('scope', 'data'),
+        capturing: await getPref('captureEnabled', true),
+        allowlist: await getPref('allowlist', []),
+        scope: await getPref('scope', 'data'),
         attachedTabs: extClients.size,
       }));
       console.log('[bridge] extension authenticated, total', extClients.size);
@@ -484,30 +675,61 @@ wssBridge.on('connection', (ws, req) => {
       // Keepalive from extension, just acknowledge
       try { ws.send(JSON.stringify({ kind: 'pong' })); } catch {}
     } else if (k === 'cookie-snapshot') {
-      // Cookie snapshot from extension (contains xs, c_user, datr, fr etc.)
-      console.log('[bridge] cookie-snapshot from', msg.host, ':', (msg.cookies||[]).map(c => c.name).join(', '));
-      broadcastToUi({ type: 'cookie-snapshot', host: msg.host, url: msg.url, cookies: msg.cookies });
+      const host = msg.host || '';
+      const url = msg.url || '';
+      const rows = (msg.cookies || []).map((c) => ({
+        host,
+        url,
+        name: c.name,
+        value: c.value,
+        domain: c.domain,
+        httpOnly: !!c.httpOnly,
+        secure: !!c.secure,
+        path: c.path,
+        source: 'cookie-snapshot',
+        ts: Date.now(),
+      }));
+      console.log('[bridge] cookie-snapshot from', host, ':', rows.map((c) => c.name).join(', '));
+      await persistCookieRows(activeSessionId, rows);
+      broadcastToUi({ type: 'cookie-snapshot', host, url, cookies: msg.cookies, sessionId: activeSessionId });
     } else if (k === 'set-cookie-capture') {
-      // Set-Cookie headers captured via webRequest API (includes HttpOnly cookies)
-      console.log('[bridge] set-cookie-capture from', msg.host, ':', (msg.cookies||[]).map(c => c.split('=')[0]).join(', '));
-      broadcastToUi({ type: 'set-cookie-capture', host: msg.host, url: msg.url, cookies: msg.cookies });
+      const host = msg.host || '';
+      const url = msg.url || '';
+      const rows = (msg.cookies || []).map((raw) => {
+        const s = String(raw || '');
+        const name = s.split('=')[0]?.trim() || '';
+        const value = s.slice(name.length + 1).split(';')[0] || '';
+        return {
+          host,
+          url,
+          name,
+          value,
+          domain: host,
+          httpOnly: /httponly/i.test(s),
+          secure: /secure/i.test(s),
+          path: (s.match(/path=([^;]+)/i) || [])[1] || null,
+          source: 'set-cookie',
+          raw: s,
+          ts: Date.now(),
+        };
+      });
+      console.log('[bridge] set-cookie-capture from', host, ':', rows.map((c) => c.name).join(', '));
+      await persistCookieRows(activeSessionId, rows);
+      broadcastToUi({ type: 'set-cookie-capture', host, url, cookies: msg.cookies, sessionId: activeSessionId });
     } else if (k === 'request') {
-      const req = msg.payload;
-      try {
-        saveRequest(activeSessionId, req);
-      } catch (e) { console.warn('[store] saveRequest', e.message); }
+      const req = await persistRequest(activeSessionId, msg.payload || {});
       broadcastToUi({ type: 'request', request: req });
     } else if (k === 'request-update') {
       const { id, patch } = msg;
-      try { updateRequest(activeSessionId, id, patch); } catch {}
+      try { await updateRequest(activeSessionId, id, patch); } catch {}
       broadcastToUi({ type: 'update', id, patch });
     } else if (k === 'ws-message') {
       const { id, message } = msg;
-      try { appendWsMessage(activeSessionId, id, message); } catch {}
+      try { await appendWsMessage(activeSessionId, id, message); } catch {}
       broadcastToUi({ type: 'ws-message', id, message });
     } else if (k === 'captcha-detected') {
       const det = msg.payload;
-      try { saveCaptcha(activeSessionId, det); } catch (e) { console.warn('[store] captcha', e.message); }
+      try { await saveCaptcha(activeSessionId, det); } catch (e) { console.warn('[store] captcha', e.message); }
       broadcastToUi({ type: 'captcha', captcha: det });
     } else {
       // relay other bridge messages to UI as-is
@@ -527,32 +749,40 @@ wssBridge.on('connection', (ws, req) => {
 
 wssUi.on('connection', (ws) => {
   uiClients.add(ws);
-  // Send current status on connect
-  ws.send(JSON.stringify({
-    type: 'status',
-    connected: extClients.size > 0,
-    sessionId: activeSessionId,
-    token: bridgeToken,
-    allowlist: getPref('allowlist', []),
-    capturing: getPref('captureEnabled', true),
-    scope: getPref('scope', 'data'),
-  }));
-  // Send recent requests
-  const reqs = loadRequests(activeSessionId, { limit: 200 });
-  ws.send(JSON.stringify({ type: 'init', requests: reqs, sessionId: activeSessionId }));
+  (async () => {
+    try {
+      ws.send(JSON.stringify({
+        type: 'status',
+        connected: extClients.size > 0,
+        sessionId: activeSessionId,
+        token: bridgeToken,
+        allowlist: await getPref('allowlist', []),
+        capturing: await getPref('captureEnabled', true),
+        scope: await getPref('scope', 'data'),
+      }));
+      const reqs = await loadRequests(activeSessionId, { limit: 200 });
+      ws.send(JSON.stringify({ type: 'init', requests: reqs, sessionId: activeSessionId }));
+    } catch (e) {
+      console.warn('[ui] init send failed', e.message);
+    }
+  })();
   ws.on('close', () => uiClients.delete(ws));
 });
 
 // Boot
 (async () => {
   try {
-    initDb();
-    activeSessionId = getOrCreateActiveSession();
-    bridgeToken = getPref('bridgeToken', '') || generateToken();
-    if (!getPref('bridgeToken', '')) {
-      setPref('bridgeToken', bridgeToken);
+    await initStore();
+    activeSessionId = await getOrCreateActiveSession();
+    const existingTok = await getPref('bridgeToken', '');
+    bridgeToken = existingTok || generateToken();
+    if (!existingTok) {
+      await setPref('bridgeToken', bridgeToken);
     }
+    // Prefer stable known token if env set
+    if (process.env.HAR_BRIDGE_TOKEN) bridgeToken = process.env.HAR_BRIDGE_TOKEN;
     server.listen(PORT, HOST, () => {
+      console.log(`[server] store=${storeBackend()} redis=${redisEnabled()} aws=${awsEnabled()}`);
       console.log(`[server] listening on ${HOST}:${PORT}`);
       console.log(`[server] active session ${activeSessionId}, token ${bridgeToken}`);
       console.log(`[server] bridge ws: /bridge/ws  ui ws: /ws  api: /api/*`);

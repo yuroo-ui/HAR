@@ -54,6 +54,24 @@ export function initDb() {
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS cookies (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sessionId INTEGER NOT NULL,
+      host TEXT,
+      name TEXT,
+      value TEXT,
+      domain TEXT,
+      httpOnly INTEGER,
+      secure INTEGER,
+      path TEXT,
+      source TEXT,
+      url TEXT,
+      raw TEXT,
+      ts INTEGER NOT NULL,
+      FOREIGN KEY (sessionId) REFERENCES sessions(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_cookies_session ON cookies(sessionId, ts);
+    CREATE INDEX IF NOT EXISTS idx_cookies_host_name ON cookies(sessionId, host, name);
   `);
   return db;
 }
@@ -85,6 +103,7 @@ export function deleteSession(sessionId) {
   const tx = d.transaction(() => {
     d.prepare('DELETE FROM requests WHERE sessionId = ?').run(sessionId);
     d.prepare('DELETE FROM captchas WHERE sessionId = ?').run(sessionId);
+    try { d.prepare('DELETE FROM cookies WHERE sessionId = ?').run(sessionId); } catch {}
     d.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
   });
   tx();
@@ -228,4 +247,97 @@ export function getOrCreateActiveSession() {
   const open = d.prepare('SELECT id FROM sessions WHERE closedAt IS NULL ORDER BY createdAt DESC LIMIT 1').get();
   if (open) return open.id;
   return createSession();
+}
+
+
+export function saveCookie(sessionId, cookie) {
+  const d = initDb();
+  const info = d
+    .prepare(
+      `INSERT INTO cookies (sessionId, host, name, value, domain, httpOnly, secure, path, source, url, raw, ts)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      sessionId,
+      cookie.host || null,
+      cookie.name || null,
+      cookie.value || null,
+      cookie.domain || null,
+      cookie.httpOnly ? 1 : 0,
+      cookie.secure ? 1 : 0,
+      cookie.path || null,
+      cookie.source || null,
+      cookie.url || null,
+      cookie.raw || null,
+      cookie.ts || Date.now(),
+    );
+  return Number(info.lastInsertRowid);
+}
+
+export function saveCookiesBulk(sessionId, cookies) {
+  const d = initDb();
+  const stmt = d.prepare(
+    `INSERT INTO cookies (sessionId, host, name, value, domain, httpOnly, secure, path, source, url, raw, ts)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  const tx = d.transaction((rows) => {
+    for (const cookie of rows) {
+      stmt.run(
+        sessionId,
+        cookie.host || null,
+        cookie.name || null,
+        cookie.value || null,
+        cookie.domain || null,
+        cookie.httpOnly ? 1 : 0,
+        cookie.secure ? 1 : 0,
+        cookie.path || null,
+        cookie.source || null,
+        cookie.url || null,
+        cookie.raw || null,
+        cookie.ts || Date.now(),
+      );
+    }
+  });
+  tx(cookies || []);
+  return (cookies || []).length;
+}
+
+export function loadCookies(sessionId, { limit = 500, host = '', name = '' } = {}) {
+  const d = initDb();
+  let sql = 'SELECT * FROM cookies WHERE sessionId = ?';
+  const params = [sessionId];
+  if (host) { sql += ' AND host LIKE ?'; params.push(`%${host}%`); }
+  if (name) { sql += ' AND name LIKE ?'; params.push(`%${name}%`); }
+  sql += ' ORDER BY ts DESC LIMIT ?';
+  params.push(limit);
+  return d.prepare(sql).all(...params).map((r) => ({
+    id: r.id,
+    sessionId: r.sessionId,
+    host: r.host,
+    name: r.name,
+    value: r.value,
+    domain: r.domain,
+    httpOnly: !!r.httpOnly,
+    secure: !!r.secure,
+    path: r.path,
+    source: r.source,
+    url: r.url,
+    raw: r.raw,
+    ts: r.ts,
+  }));
+}
+
+export function clearCookies(sessionId) {
+  initDb().prepare('DELETE FROM cookies WHERE sessionId = ?').run(sessionId);
+}
+
+export function exportCookieJar(sessionId) {
+  const rows = loadCookies(sessionId, { limit: 5000 });
+  // collapse to latest value per host+name
+  const map = new Map();
+  for (const r of rows) {
+    const key = `${r.host || ''}::${r.name || ''}`;
+    if (!map.has(key)) map.set(key, r);
+  }
+  return Array.from(map.values()).sort((a, b) => (a.host || '').localeCompare(b.host || '') || (a.name || '').localeCompare(b.name || ''));
 }

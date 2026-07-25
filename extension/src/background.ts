@@ -25,6 +25,7 @@ import type {
   CaptchaType,
 } from '@har-suite/shared';
 import { detectFromUrl, stableId } from './captcha-detector.js';
+import { WebRequestFallback } from './webrequest-fallback.js';
 
 const KEEP_ALIVE_ALARM = 'bridge-keepalive';
 
@@ -182,6 +183,27 @@ const injectedScanner = new Map<number, string>();
 const seenCaptchas = new Map<string, number>();
 const SEEN_CAPTCHA_LIMIT = 500;
 const CAPTCHA_DEDUPE_MS = 30_000;
+const jsDedupe = new Map<string, number>();
+const JS_DEDUPE_MS = 1500;
+const cdpDedupe = new Map<string, number>();
+const REQ_DEDUPE_MS = 1200;
+function requestDedupeKey(tabId: number, method: string, url: string) {
+  return `${tabId}|${(method || "GET").toUpperCase()}|${url || ""}`;
+}
+function shouldEmitRequest(tabId: number, method: string, url: string, _source: string) {
+  const key = requestDedupeKey(tabId, method, url);
+  const now = Date.now();
+  const last = cdpDedupe.get(key) ?? 0;
+  if (now - last < REQ_DEDUPE_MS) return false;
+  cdpDedupe.set(key, now);
+  // also mark js dedupe so js-capture skips same traffic
+  jsDedupe.set(key, now);
+  if (cdpDedupe.size > 3000) {
+    const first = cdpDedupe.keys().next().value;
+    if (first) cdpDedupe.delete(first);
+  }
+  return true;
+}
 
 // Tabs that should keep capturing across same-tab navigations to ANY host (flow
 // capture). A tab becomes sticky when it matches the allowlist while capture is on,
@@ -263,6 +285,7 @@ function maybeDetectCaptchaFromUrl(
 const capture = new DebuggerCapture(
   {
     onRequest: (req) => {
+      if (!shouldEmitRequest(req.tabId, req.method, req.url, 'cdp')) return;
       recentRequests.set(req.id, req);
       if (recentRequests.size > RECENT_LIMIT) {
         const firstKey = recentRequests.keys().next().value;
@@ -293,6 +316,36 @@ const capture = new DebuggerCapture(
   },
   () => currentScope,
 );
+
+// Mobile / Kiwi / Mises fallback when debugger attach fails or is unavailable.
+const wrFallback = new WebRequestFallback(
+  {
+    onRequest: (req) => {
+      if (!shouldEmitRequest(req.tabId, req.method, req.url, 'webRequest')) return;
+      recentRequests.set(req.id, req);
+      if (recentRequests.size > RECENT_LIMIT) {
+        const firstKey = recentRequests.keys().next().value;
+        if (firstKey) recentRequests.delete(firstKey);
+      }
+      bridge.send({ kind: 'request', payload: req });
+      maybeDetectCaptcha(req);
+      snapshotCookies(req.url, req.host);
+    },
+    onUpdate: (id, patch) => {
+      const cur = recentRequests.get(id);
+      if (cur) Object.assign(cur, patch);
+      bridge.send({ kind: 'request-update', id, patch });
+    },
+  },
+  {
+    getScope: () => currentScope,
+    getAllowlist,
+    getCaptureEnabled,
+    isSticky: (tabId) => stickyTabs.has(tabId),
+    isDebuggerAttached: (tabId) => capture.isAttached(tabId),
+  },
+);
+wrFallback.start();
 
 function parseHost(url: string | undefined): string {
   if (!url) return '';
@@ -576,6 +629,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         token: await getRemoteToken(),
         localConnected: localBridge.isOpen(),
         remoteConnected: remoteBridge.isOpen(),
+        debuggerAttached: capture.attachedCount(),
+        fallbackActive: true,
+        captureMode: capture.attachedCount() > 0 ? 'debugger' : 'webRequest-fallback',
       });
 
     } else if (msg?.kind === 'js-capture') {
@@ -590,6 +646,20 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       if (!allowed) {
         sendResponse({ ok: false, error: 'host-not-allowlisted' });
         return;
+      }
+      // Dedupe against CDP-captured traffic (same method+url within window)
+      const jsDedupeKey = requestDedupeKey(tabId, msg.method || 'GET', msg.url || '');
+      const nowJs = Date.now();
+      const lastJs = Math.max(jsDedupe.get(jsDedupeKey) ?? 0, cdpDedupe.get(jsDedupeKey) ?? 0);
+      if (nowJs - lastJs < JS_DEDUPE_MS) {
+        sendResponse({ ok: true, deduped: true });
+        return;
+      }
+      jsDedupe.set(jsDedupeKey, nowJs);
+      cdpDedupe.set(jsDedupeKey, nowJs);
+      if (jsDedupe.size > 2000) {
+        const first = jsDedupe.keys().next().value;
+        if (first) jsDedupe.delete(first);
       }
       bridge.send({
         kind: 'request',

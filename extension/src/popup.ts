@@ -28,7 +28,15 @@ async function getState(): Promise<State> {
   return await chrome.runtime.sendMessage({ kind: 'popup-get-state', tabId });
 }
 
-async function getRemoteState(): Promise<{ ok: boolean; enabled: boolean; url: string; token: string }> {
+async function getRemoteState(): Promise<{
+  ok: boolean;
+  enabled: boolean;
+  url: string;
+  token: string;
+  localConnected?: boolean;
+  remoteConnected?: boolean;
+  debuggerAttached?: number;
+}> {
   try {
     return await chrome.runtime.sendMessage({ kind: 'popup-get-remote-state' });
   } catch {
@@ -116,12 +124,16 @@ async function render(state: State) {
     if (tokenEl.value !== fromState) tokenEl.value = fromState;
   }
 
-  // Show connection status based on bridge state
-  const hasToken = !!(state.token || '').trim();
-  
-  $('conn').innerHTML = `<span class="dot ${state.connected ? 'on' : 'off'}"></span>${
-    state.connected ? 'Connected' : hasToken ? 'Connecting…' : 'No token'
-  }`;
+  // Dual connection status: local desktop and/or remote
+  const rs = await getRemoteState();
+  const localOn = !!(rs.localConnected || (state.connected && !rs.remoteConnected));
+  const remoteOn = !!rs.remoteConnected;
+  const any = !!(state.connected || localOn || remoteOn);
+  const parts = [];
+  parts.push(localOn ? 'Local ON' : 'Local off');
+  parts.push(rs.enabled === false ? 'Remote off' : remoteOn ? 'Remote ON' : 'Remote…');
+  if (typeof rs.debuggerAttached === 'number') parts.push(`Dbg ${rs.debuggerAttached}`);
+  $('conn').innerHTML = `<span class="dot ${any ? 'on' : 'off'}"></span>${parts.join(' · ')}`;
   $('status').innerHTML = `<span class="dot ${state.capturing ? 'on' : 'off'}"></span>${
     state.capturing
       ? `Capturing · ${state.allowlist.length} domain${state.allowlist.length === 1 ? '' : 's'} · ${state.attachedTabs} tab${state.attachedTabs === 1 ? '' : 's'}`
@@ -168,7 +180,10 @@ async function refreshRemote() {
     if (tokenEl.value !== (rs.token || '')) tokenEl.value = rs.token || '';
   }
   if (statusEl) {
-    statusEl.textContent = rs.enabled ? 'Remote ON — streaming to server.' : 'Remote OFF.';
+    const loc = rs.localConnected ? 'local:connected' : 'local:down';
+    const rem = rs.enabled === false ? 'remote:disabled' : rs.remoteConnected ? 'remote:connected' : 'remote:connecting';
+    const dbg = typeof rs.debuggerAttached === 'number' ? ` · debugger tabs: ${rs.debuggerAttached}` : '';
+    statusEl.textContent = `${loc} · ${rem}${dbg}`;
   }
 }
 

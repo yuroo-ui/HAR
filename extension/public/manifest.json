@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "HAR Capture Suite",
-  "version": "0.3.0",
-  "description": "HAR Capture Suite (waguri base + remote bridge, cookie capture, JS capture). Local desktop + optional remote server.",
+  "version": "0.4.0",
+  "description": "HAR Capture Suite v0.4 \u2014 dual bridge, cookie capture, JS capture, mobile webRequest fallback",
   "permissions": [
     "debugger",
     "tabs",
