@@ -175,18 +175,30 @@ if (_W.__harSuiteJsCapture) {
     if (body == null) return undefined;
     if (typeof body === 'string') return body;
     if (body instanceof URLSearchParams) return body.toString();
-    if (body instanceof ArrayBuffer) return `[ArrayBuffer ${body.byteLength} bytes]`;
-    if (typeof ArrayBuffer !== 'undefined' && ArrayBuffer.isView?.(body)) return `[TypedArray ${body.byteLength} bytes]`;
-    if (typeof Blob !== 'undefined' && body instanceof Blob) return `[Blob ${body.size} bytes type=${body.type || ''}]`;
+    if (body instanceof ArrayBuffer) return JSON.stringify({ __binary: true, kind: 'ArrayBuffer', byteLength: body.byteLength });
+    if (typeof ArrayBuffer !== 'undefined' && ArrayBuffer.isView?.(body)) {
+      return JSON.stringify({ __binary: true, kind: 'TypedArray', byteLength: body.byteLength, type: (body as any).constructor?.name });
+    }
+    if (typeof Blob !== 'undefined' && body instanceof Blob) {
+      return JSON.stringify({ __binary: true, kind: 'Blob', size: body.size, type: body.type || '' });
+    }
     if (typeof FormData !== 'undefined' && body instanceof FormData) {
       try {
-        const obj: Record<string, string> = {};
+        const parts: Array<Record<string, unknown>> = [];
         body.forEach((v, k) => {
-          obj[k] = typeof v === 'string' ? v : `[File ${v.name || 'blob'} ${v.size || 0}]`;
+          if (typeof v === 'string') parts.push({ name: k, type: 'string', value: v.slice(0, 2000) });
+          else parts.push({
+            name: k,
+            type: 'file',
+            fileName: (v as File).name || 'blob',
+            size: (v as File).size || 0,
+            mimeType: (v as File).type || '',
+            lastModified: (v as File).lastModified || null,
+          });
         });
-        return JSON.stringify(obj);
+        return JSON.stringify({ __multipart: true, parts });
       } catch {
-        return '[FormData]';
+        return JSON.stringify({ __multipart: true, parts: [] });
       }
     }
     try { return String(body); } catch { return undefined; }
@@ -526,6 +538,19 @@ if (_W.__harSuiteJsCapture) {
   Object.defineProperty(CapturedWebSocket, 'CLOSED', { value: OrigWebSocket.CLOSED });
   Object.defineProperty(CapturedWebSocket, 'toString', { value: () => 'function WebSocket() { [native code] }' });
   (window as any).WebSocket = CapturedWebSocket;
+
+  // bfcache restore signal
+  window.addEventListener('pageshow', (ev) => {
+    if ((ev as PageTransitionEvent).persisted) {
+      send({
+        kind: 'js-capture',
+        subtype: 'inline-script',
+        code: '[bfcache-restore pageshow persisted=true]',
+        timestamp: Date.now(),
+        pageUrl: location.href,
+      });
+    }
+  });
 
   console.log('[HAR Suite] JS capture active — fetch/XHR body, WS frames, eval, beacon, workers');
 }

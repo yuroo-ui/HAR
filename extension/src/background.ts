@@ -535,10 +535,24 @@ bridge.onAuthenticated(async () => {
 hydrateState();
 bridge.start();
 
+// Early attach: arm debugger before commit to reduce race with first requests.
+chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
+  if (details.frameId !== 0) return;
+  await maybeAttachTab(details.tabId, details.url);
+});
+
 chrome.webNavigation.onCommitted.addListener(async (details) => {
   if (details.frameId !== 0) return;
   await maybeAttachTab(details.tabId, details.url);
 });
+
+// SPA / history API navigations
+try {
+  chrome.webNavigation.onHistoryStateUpdated.addListener(async (details) => {
+    if (details.frameId !== 0) return;
+    await maybeAttachTab(details.tabId, details.url);
+  });
+} catch {}
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   if (capture.isAttached(tabId)) capture.detach(tabId);

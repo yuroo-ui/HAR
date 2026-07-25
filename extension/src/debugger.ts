@@ -133,6 +133,10 @@ export class DebuggerCapture {
         flatten: true,
         filter: CHILD_FILTER,
       });
+      // Discover late-created service workers / workers after attach.
+      try {
+        await chrome.debugger.sendCommand({ tabId }, 'Target.setDiscoverTargets', { discover: true });
+      } catch {}
       console.log('[debugger] attached', tabId);
     } catch (e) {
       // Only the owning attempt reaches here (a genuine failure) — clean up its own state.

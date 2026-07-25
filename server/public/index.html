@@ -110,6 +110,27 @@
   <body>
     <div id="root"></div>
     <div id="health-chip" style="position:fixed;left:12px;bottom:12px;z-index:99999;background:#111827;color:#e5e7eb;border:1px solid #374151;border-radius:999px;padding:8px 12px;font:12px/1.3 ui-sans-serif,system-ui;max-width:70vw">health…</div>
+    <div id="req-panel" style="position:fixed;left:12px;bottom:56px;z-index:99999;width:min(420px,94vw);max-height:40vh;overflow:auto;background:#111827;color:#e5e7eb;border:1px solid #374151;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.35);font:12px/1.4 ui-sans-serif,system-ui">
+      <div style="display:flex;gap:8px;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid #374151;position:sticky;top:0;background:#111827">
+        <strong>Requests</strong>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <button id="rp-refresh" style="background:#2563eb;color:#fff;border:0;border-radius:8px;padding:6px 8px;cursor:pointer">Refresh</button>
+          <button id="rp-zip" style="background:#059669;color:#fff;border:0;border-radius:8px;padding:6px 8px;cursor:pointer">ZIP</button>
+          <button id="rp-har" style="background:#0d9488;color:#fff;border:0;border-radius:8px;padding:6px 8px;cursor:pointer">HAR</button>
+          <button id="rp-hide" style="background:#374151;color:#fff;border:0;border-radius:8px;padding:6px 8px;cursor:pointer">Hide</button>
+        </div>
+      </div>
+      <div style="padding:8px 12px;display:flex;gap:6px;flex-wrap:wrap;border-bottom:1px solid #1f2937">
+        <input id="rp-host" placeholder="host" style="flex:1;min-width:80px;background:#0b1220;border:1px solid #374151;color:#e5e7eb;border-radius:8px;padding:6px 8px"/>
+        <input id="rp-method" placeholder="method" style="width:70px;background:#0b1220;border:1px solid #374151;color:#e5e7eb;border-radius:8px;padding:6px 8px"/>
+        <input id="rp-status" placeholder="status" style="width:60px;background:#0b1220;border:1px solid #374151;color:#e5e7eb;border-radius:8px;padding:6px 8px"/>
+        <input id="rp-type" placeholder="type" style="width:70px;background:#0b1220;border:1px solid #374151;color:#e5e7eb;border-radius:8px;padding:6px 8px"/>
+        <input id="rp-q" placeholder="search" style="flex:1;min-width:80px;background:#0b1220;border:1px solid #374151;color:#e5e7eb;border-radius:8px;padding:6px 8px"/>
+      </div>
+      <div id="rp-meta" style="padding:8px 12px;color:#9ca3af"></div>
+      <pre id="rp-list" style="margin:0;padding:0 12px 12px;white-space:pre-wrap;word-break:break-all"></pre>
+    </div>
+    <button id="rp-show" style="display:none;position:fixed;left:12px;bottom:56px;z-index:99999;background:#111827;color:#e5e7eb;border:1px solid #374151;border-radius:999px;padding:10px 14px;cursor:pointer">Requests</button>
     <div id="cookie-panel" style="position:fixed;right:12px;bottom:12px;z-index:99999;width:min(460px,94vw);max-height:55vh;overflow:auto;background:#111827;color:#e5e7eb;border:1px solid #374151;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.35);font:12px/1.4 ui-sans-serif,system-ui">
       <div style="display:flex;gap:8px;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid #374151;position:sticky;top:0;background:#111827">
         <strong>Cookies</strong>
@@ -198,6 +219,39 @@
         setTimeout(()=>{ refresh(); refreshHealth(); }, 500);
         setInterval(refresh, 10000);
         setInterval(refreshHealth, 5000);
+
+        // Requests filter panel
+        const rp=document.getElementById('req-panel');
+        const rpShow=document.getElementById('rp-show');
+        const rpList=document.getElementById('rp-list');
+        const rpMeta=document.getElementById('rp-meta');
+        function rqs(){
+          const p=new URLSearchParams();
+          p.set('limit','100');
+          ['host','method','status','type','q'].forEach((k)=>{
+            const el=document.getElementById('rp-'+k);
+            if(el && el.value.trim()) p.set(k==='q'? 'q' : k, el.value.trim());
+          });
+          return p.toString();
+        }
+        async function refreshReqs(){
+          try{
+            const d=await fetch('/api/requests?'+rqs()).then(r=>r.json());
+            const rows=d.requests||[];
+            rpMeta.textContent = (d.total||rows.length) + ' requests';
+            rpList.textContent = rows.slice(0,80).map(r => `${r.status||'-'} ${r.method||''} ${r.type||''} ${r.host||''} ${r.url||''}`).join('\n') || '(empty)';
+          }catch(e){ rpMeta.textContent='failed: '+e.message; }
+        }
+        document.getElementById('rp-refresh').onclick=refreshReqs;
+        document.getElementById('rp-hide').onclick=()=>{ rp.style.display='none'; rpShow.style.display='block'; };
+        rpShow.onclick=()=>{ rp.style.display='block'; rpShow.style.display='none'; refreshReqs(); };
+        ['rp-host','rp-method','rp-status','rp-type','rp-q'].forEach(id=>{
+          const el=document.getElementById(id); if(el) el.oninput=()=>{ clearTimeout(window.__rpf); window.__rpf=setTimeout(refreshReqs,250); };
+        });
+        document.getElementById('rp-har').onclick=()=>{ location.href='/api/export/har'; };
+        document.getElementById('rp-zip').onclick=()=>{ location.href='/api/export/zip'; };
+        setTimeout(refreshReqs, 700);
+        setInterval(refreshReqs, 12000);
       })();
     </script>
   </body>

@@ -21,6 +21,10 @@ import {
 import { awsEnabled } from './aws-store.js';
 import { buildHar } from './har-export.js';
 import { redisEnabled, redisPing, redisMarkExtConnected } from './redis-store.js';
+import {
+  rateLimit, sendTelegram, telegramConfigured, evaluateHealthAlerts,
+  buildCurlWithCookies, cookieHeaderForHost, buildSessionZipBuffer, runRetention,
+} from './ops.js';
 
 const BRIDGE_VERSION = 2;
 
@@ -204,6 +208,13 @@ const server = http.createServer(async (req, res) => {
   }
   const pathname = url.pathname;
 
+  // Optional IP allowlist for API/bridge (comma-separated CIDR-less exact IPs)
+  const allowIps = (process.env.HAR_IP_ALLOWLIST || '').split(',').map((s) => s.trim()).filter(Boolean);
+  const clientIp = (req.socket?.remoteAddress || '').replace('::ffff:', '');
+  if (allowIps.length && pathname.startsWith('/api/') && !allowIps.includes(clientIp) && clientIp !== '127.0.0.1') {
+    return json(res, { error: 'ip-not-allowed' }, 403);
+  }
+
   // ── Web UI is served under / (built renderer dist) ──
   if (pathname.startsWith('/api/')) {
     // REST API for web UI (mirrors Electron IPC surface via HTTP)
@@ -257,18 +268,22 @@ const server = http.createServer(async (req, res) => {
         captchas: await loadCaptchas(activeSessionId),
       });
     }
-    // GET /api/requests?limit&offset&q&host&method
+    // GET /api/requests?limit&offset&q&host&method&status&type
     if (pathname === '/api/requests' && req.method === 'GET') {
       const limit = Math.min(Number(url.searchParams.get('limit') || 500), 2000);
       const offset = Number(url.searchParams.get('offset') || 0);
       const q = url.searchParams.get('q') || '';
       const host = url.searchParams.get('host') || '';
       const method = url.searchParams.get('method') || '';
+      const status = url.searchParams.get('status') || '';
+      const type = url.searchParams.get('type') || '';
       const sessionId = Number(url.searchParams.get('sessionId') || activeSessionId);
-      return json(res, {
-        requests: await loadRequests(sessionId, { limit, offset, q, host, method }),
-        total: await countRequests(sessionId),
-      });
+      let requests = await loadRequests(sessionId, { limit: Math.min(limit + offset + 500, 5000), offset: 0, q, host, method });
+      if (status) requests = requests.filter((r) => String(r.status ?? '') === String(status));
+      if (type) requests = requests.filter((r) => String(r.type || '').toLowerCase() === type.toLowerCase());
+      const total = requests.length;
+      requests = requests.slice(offset, offset + limit);
+      return json(res, { requests, total, filters: { q, host, method, status, type } });
     }
     // DELETE /api/requests (clear active)
     if (pathname === '/api/requests' && req.method === 'DELETE') {
@@ -375,7 +390,7 @@ const server = http.createServer(async (req, res) => {
       return json(res, { ok: true, capturing: !!body.enabled });
     }
     // POST /api/token/regenerate
-    if (pathname === '/api/token/regenerate' && req.method === 'POST') {
+    if ((pathname === '/api/token/regenerate' || pathname === '/api/token/rotate') && req.method === 'POST') {
       bridgeToken = generateToken();
       await setPref('bridgeToken', bridgeToken);
       return json(res, { token: bridgeToken });
@@ -423,6 +438,8 @@ const server = http.createServer(async (req, res) => {
     }
     // POST /api/bridge/send — HTTP send fallback for extensions
     if (pathname === '/api/bridge/send' && req.method === 'POST') {
+      const rl = rateLimit(clientIp, { limit: Number(process.env.HAR_RATE_LIMIT || 180), windowMs: 60_000 });
+      if (!rl.ok) return json(res, { error: 'rate-limited', retryAfterMs: rl.retryAfterMs }, 429);
       const body = await readJson(req).catch(() => ({}));
       const token = body.token || url.searchParams.get('token') || '';
       if (bridgeToken && token !== bridgeToken) {
@@ -514,7 +531,36 @@ const server = http.createServer(async (req, res) => {
       const sid = Number(url.searchParams.get('sessionId') || activeSessionId);
       const reqs = await loadRequests(sid, { limit: 5000 });
       if (fmt === 'json') return json(res, { sessionId: sid, count: reqs.length, requests: reqs });
-      const har = buildHar(reqs, { creatorVersion: '0.4.1' });
+      const har = buildHar(reqs, { creatorVersion: '0.5.0' });
+      if (fmt === 'zip') {
+        const jar = await exportCookieJar(sid);
+        const asHeader = jar.map((c) => `${c.name}=${c.value}`).join('; ');
+        const netscapeLines = ['# Netscape HTTP Cookie File', ''];
+        for (const c of jar) {
+          const domain = c.domain || c.host || '';
+          netscapeLines.push([domain, domain.startsWith('.') ? 'TRUE' : 'FALSE', c.path || '/', c.secure ? 'TRUE' : 'FALSE', '0', c.name || '', c.value || ''].join('	'));
+        }
+        const cookiesExport = { sessionId: sid, count: jar.length, jar, cookieHeader: asHeader, netscape: netscapeLines.join('\n') };
+        const summary = {
+          sessionId: sid,
+          exportedAt: new Date().toISOString(),
+          requestCount: reqs.length,
+          cookieCount: jar.length,
+          backend: storeBackend(),
+          tokenProtected: true,
+        };
+        try {
+          const buf = buildSessionZipBuffer({ sessionId: sid, har, cookiesExport, summary });
+          res.writeHead(200, {
+            'Content-Type': 'application/zip',
+            'Content-Disposition': `attachment; filename="session-${sid}.zip"`,
+            'Access-Control-Allow-Origin': '*',
+          });
+          return res.end(buf);
+        } catch (e) {
+          return json(res, { error: 'zip-failed', message: e.message }, 500);
+        }
+      }
       if (fmt === 'har' || fmt === 'har.json') {
         res.writeHead(200, {
           'Content-Type': 'application/json; charset=utf-8',
@@ -533,6 +579,17 @@ const server = http.createServer(async (req, res) => {
       if (!r) return json(res, { error: 'not found' }, 404);
       const curl = `curl -X ${r.method} '${r.url}'${(r.requestHeaders||[]).map(h => ` -H '${h.name}: ${h.value}'`).join('')}${r.requestBody ? ` -d '${r.requestBody.replace(/'/g, "\\'")}'` : ''}`;
       return json(res, { curl });
+    }
+    // GET /api/requests/:id/to-curl-cookies (merge cookie jar for host)
+    if (pathname.match(/^\/api\/requests\/[^/]+\/to-curl-cookies$/) && req.method === 'GET') {
+      const id = pathname.split('/')[3];
+      const reqs = await loadRequests(activeSessionId, { limit: 5000 });
+      const r = reqs.find(x => x.id === id);
+      if (!r) return json(res, { error: 'not found' }, 404);
+      const jar = await exportCookieJar(activeSessionId);
+      const ch = cookieHeaderForHost(jar, r.host || '');
+      const curl = buildCurlWithCookies(r, ch);
+      return json(res, { curl, cookieHeader: ch, host: r.host });
     }
     // GET /api/requests/:id/to-fetch
     if (pathname.match(/^\/api\/requests\/[^/]+\/to-fetch$/) && req.method === 'GET') {
@@ -796,12 +853,43 @@ wssUi.on('connection', (ws) => {
     // Prefer stable known token if env set
     if (process.env.HAR_BRIDGE_TOKEN) bridgeToken = process.env.HAR_BRIDGE_TOKEN;
     server.listen(PORT, HOST, () => {
-      console.log(`[server] store=${storeBackend()} redis=${redisEnabled()} aws=${awsEnabled()}`);
+      console.log(`[server] store=${storeBackend()} redis=${redisEnabled()} aws=${awsEnabled()} telegram=${telegramConfigured()}`);
       console.log(`[server] listening on ${HOST}:${PORT}`);
       console.log(`[server] active session ${activeSessionId}, token ${bridgeToken}`);
       console.log(`[server] bridge ws: /bridge/ws  ui ws: /ws  api: /api/*`);
       console.log(`[server] UI: http://${HOST}:${PORT}/ (public/ or renderer build)`);
     });
+
+    // Health alerts every 60s
+    setInterval(async () => {
+      try {
+        let redisOk = false;
+        try { redisOk = await redisPing(); } catch {}
+        let dbOk = true;
+        try { await countRequests(activeSessionId); } catch { dbOk = false; }
+        await evaluateHealthAlerts({
+          extensionConnected: extClients.size > 0,
+          dbOk,
+          redisOk,
+          lastExtEventAt,
+          now: Date.now(),
+        });
+      } catch (e) {
+        console.warn('[alerts]', e.message);
+      }
+    }, 60_000);
+
+    // Retention daily-ish (run at boot + every 6h)
+    const retentionJob = async () => {
+      try {
+        const result = await runRetention({ listSessions, deleteSession, maxAgeDays: process.env.HAR_RETENTION_DAYS || 14 });
+        if (result.deleted) console.log('[retention] deleted sessions', result.deleted, 'days', result.days);
+      } catch (e) {
+        console.warn('[retention]', e.message);
+      }
+    };
+    retentionJob();
+    setInterval(retentionJob, 6 * 3600_000);
   } catch (e) {
     console.error('[server] boot failed', e);
     process.exit(1);
