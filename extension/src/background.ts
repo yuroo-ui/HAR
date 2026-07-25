@@ -600,12 +600,16 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     } else if (msg?.kind === 'popup-set-allowlist') {
       await setAllowlist(msg.domains ?? []);
       await syncTabsWithAllowlist();
-      bridge.send({ kind: 'allowlist-sync', domains: await getAllowlist() });
-      sendResponse({ ok: true });
+      const domains = await getAllowlist();
+      // Explicit sync to remote/local server so server prefs mirror extension
+      bridge.send({ kind: 'allowlist-sync', domains });
+      await broadcastStatus();
+      sendResponse({ ok: true, allowlist: domains });
     } else if (msg?.kind === 'popup-set-capture') {
       await setCaptureEnabled(!!msg.enabled);
       if (msg.enabled) await syncTabsWithAllowlist();
       else await disableCapture();
+      await broadcastStatus();
       sendResponse({ ok: true });
     } else if (msg?.kind === 'popup-set-scope') {
       currentScope = msg.scope === 'all' ? 'all' : 'data';

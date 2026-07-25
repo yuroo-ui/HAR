@@ -125,6 +125,34 @@ async function persistCookieRows(sessionId, rows) {
   }
 }
 
+/** Extension → server config sync (allowlist/scope/capture). */
+async function applyExtConfig(msg = {}) {
+  const changed = {};
+  if (Array.isArray(msg.domains)) {
+    await setPref('allowlist', msg.domains);
+    changed.allowlist = msg.domains;
+  } else if (Array.isArray(msg.allowlist)) {
+    await setPref('allowlist', msg.allowlist);
+    changed.allowlist = msg.allowlist;
+  }
+  if (typeof msg.capturing === 'boolean') {
+    await setPref('captureEnabled', msg.capturing);
+    changed.captureEnabled = msg.capturing;
+  } else if (typeof msg.enabled === 'boolean' && msg.kind === 'set-capture') {
+    await setPref('captureEnabled', msg.enabled);
+    changed.captureEnabled = msg.enabled;
+  }
+  if (msg.scope === 'all' || msg.scope === 'data') {
+    await setPref('scope', msg.scope);
+    changed.scope = msg.scope;
+  }
+  if (Object.keys(changed).length) {
+    console.log('[bridge] ext config sync', JSON.stringify(changed));
+    broadcastToUi({ type: 'status', ...changed, sessionId: activeSessionId });
+  }
+  return changed;
+}
+
 function broadcastToUi(obj) {
   const raw = JSON.stringify(obj);
   for (const ws of uiClients) {
@@ -447,7 +475,16 @@ const server = http.createServer(async (req, res) => {
       }
       // Process the message same as WS bridge
       const k = body.kind;
-      if (k === 'request') {
+      if (k === 'allowlist-sync' || k === 'set-allowlist') {
+        await applyExtConfig({ domains: body.domains || body.allowlist || [] });
+      } else if (k === 'status') {
+        await applyExtConfig({ allowlist: body.allowlist, capturing: body.capturing, scope: body.scope });
+        broadcastToUi({ type: 'status', capturing: body.capturing, allowlist: body.allowlist, scope: body.scope, attachedTabs: body.attachedTabs, connected: true });
+      } else if (k === 'set-capture') {
+        await applyExtConfig({ enabled: body.enabled, kind: 'set-capture' });
+      } else if (k === 'set-capture-scope') {
+        await applyExtConfig({ scope: body.scope });
+      } else if (k === 'request') {
         const req2 = await persistRequest(activeSessionId, body.payload || {});
         broadcastToUi({ type: 'request', request: req2 });
       } else if (k === 'request-update') {
@@ -742,6 +779,27 @@ wssBridge.on('connection', (ws, req) => {
     if (k === 'ping') {
       // Keepalive from extension, just acknowledge
       try { ws.send(JSON.stringify({ kind: 'pong' })); } catch {}
+    } else if (k === 'allowlist-sync' || k === 'set-allowlist') {
+      await applyExtConfig({ domains: msg.domains || msg.allowlist || [] });
+    } else if (k === 'status') {
+      // Extension broadcasts full status after auth / popup changes
+      await applyExtConfig({
+        allowlist: msg.allowlist,
+        capturing: msg.capturing,
+        scope: msg.scope,
+      });
+      broadcastToUi({
+        type: 'status',
+        capturing: msg.capturing,
+        allowlist: msg.allowlist,
+        scope: msg.scope,
+        attachedTabs: msg.attachedTabs,
+        connected: true,
+      });
+    } else if (k === 'set-capture') {
+      await applyExtConfig({ enabled: msg.enabled, kind: 'set-capture' });
+    } else if (k === 'set-capture-scope') {
+      await applyExtConfig({ scope: msg.scope });
     } else if (k === 'cookie-snapshot') {
       const host = msg.host || '';
       const url = msg.url || '';
